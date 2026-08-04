@@ -1,0 +1,32 @@
+{
+  "name": "rondo-rataje-3d",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:smoke": "playwright test",
+    "data:refresh": "tsx scripts/refresh-data.ts"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "proj4": "^2.19.10",
+    "shapefile": "^0.6.6",
+    "three": "0.185.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1",
+    "@types/node": "^24.1.0",
+    "@types/proj4": "^2.5.6",
+    "@types/shapefile": "^0.6.4",
+    "@types/three": "^0.185.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.6",
+    "vitest": "^3.2.4"
+  }
+}

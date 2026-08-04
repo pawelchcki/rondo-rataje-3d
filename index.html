@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="A measured 200 metre 3D map around Rondo Rataje in Poznań." />
+    <title>Rondo Rataje · 200 m</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="scene" aria-label="Interactive 3D map of Rondo Rataje"></canvas>
+      <section class="intro" aria-labelledby="title">
+        <p class="eyebrow">POZNAŃ · 52.395556° N, 16.950278° E</p>
+        <h1 id="title">Rondo<br />Rataje</h1>
+        <p class="lede"><span>200 m</span> of measured terrain, movement, buildings and urban canopy.</p>
+      </section>
+      <section class="controls" aria-label="Map controls">
+        <div class="view-buttons">
+          <button type="button" data-action="reset">Oblique</button>
+          <button type="button" data-action="top">Top view</button>
+        </div>
+        <fieldset>
+          <legend>Layers</legend>
+          <label><input type="checkbox" data-layer="terrain" checked /><span>Terrain</span></label>
+          <label><input type="checkbox" data-layer="transport" checked /><span>Movement</span></label>
+          <label><input type="checkbox" data-layer="buildings" checked /><span>Buildings <output id="building-count">—</output></span></label>
+          <label><input type="checkbox" data-layer="stations" checked /><span>Stops <output id="station-count">—</output></span></label>
+          <label><input type="checkbox" data-layer="trees" checked /><span>Trees <output id="tree-count">—</output></span></label>
+        </fieldset>
+        <label class="exaggeration"><input type="checkbox" data-action="exaggerate" /><span>Terrain ×3</span></label>
+      </section>
+      <aside id="details" class="details" aria-live="polite" hidden></aside>
+      <div class="north" aria-hidden="true"><span>N</span><i></i></div>
+      <p id="status" class="status">Loading measured scene…</p>
+      <footer>
+        <span>Data: <a href="https://www.geoportal.gov.pl/pl/dane/numeryczny-model-terenu-nmt/" target="_blank" rel="noreferrer">GUGiK</a> · <a href="https://geopoz.poznan.pl/geo/aktualnosci/1719%2CRoslinnosc-w-Modelu-3D.html" target="_blank" rel="noreferrer">GEOPOZ / Miasto Poznań</a></span>
+        <span>Measured data · stylized rendering</span>
+      </footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
