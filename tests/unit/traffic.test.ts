@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRAFFIC_NETWORK, polylineLength, roadVehicleContained, samplePolyline } from '../../src/traffic-network.ts';
+import { TRAFFIC_NETWORK, polylineLength, roadVehicleContained, sampleSmoothPolyline } from '../../src/traffic-network.ts';
 import type { ApproachId, TrafficMode } from '../../src/traffic-network.ts';
 import { TRAFFIC_DENSITY_TARGETS, TrafficSimulation } from '../../src/traffic-simulation.ts';
 import type { TrafficDensity } from '../../src/traffic-simulation.ts';
@@ -79,7 +79,7 @@ describe('authored traffic topology', () => {
       const dimensions: [number, number] = route.mode === 'bus' ? [11.5, 2.45] : [4.2, 1.78];
       const length = polylineLength(route.points);
       for (let distance = dimensions[0] / 2 + 0.25; distance < length - dimensions[0] / 2 - 0.25; distance += 0.5) {
-        const pose = samplePolyline(route.points, distance);
+        const pose = sampleSmoothPolyline(route.points, distance);
         expect(
           roadVehicleContained(pose.point, pose.heading, dimensions[0], dimensions[1], 0.01),
           `${route.id} leaves the road at ${distance.toFixed(1)} m`,
@@ -133,6 +133,35 @@ describe('seeded fixed-step microsimulation', () => {
     a.advance(1);
     expect(a.snapshot()).not.toBe(paused);
   });
+
+  it('lets cars, buses, and trams cross only with signal permission and limits acceleration jerk', () => {
+    const simulation = new TrafficSimulation();
+    const previousClearance = new Map(simulation.agents.map((agent) => [agent.id, agent.signalCleared]));
+    const previousAcceleration = new Map(simulation.agents.map((agent) => [agent.id, agent.acceleration]));
+    const crossings = { car: 0, bus: 0, tram: 0 };
+    for (let tick = 0; tick < 7_200; tick += 1) {
+      simulation.advance(1 / 30);
+      for (const agent of simulation.agents) {
+        const wasCleared = previousClearance.get(agent.id) ?? agent.signalCleared;
+        if (!wasCleared && agent.signalCleared) {
+          expect(simulation.vehicleSignal(agent.route.signalGroup)).not.toBe('red');
+          crossings[agent.mode] += 1;
+        }
+        if (!agent.signalCleared && agent.route.stopAt !== undefined) expect(agent.distance).toBeLessThan(agent.route.stopAt);
+        const priorAcceleration = previousAcceleration.get(agent.id) ?? agent.acceleration;
+        if (agent.speed > 0.5 && agent.dwellRemaining === 0) {
+          const jerkLimit = agent.mode === 'car' ? 4 : agent.mode === 'bus' ? 1.8 : 1.25;
+          expect(Math.abs(agent.acceleration - priorAcceleration)).toBeLessThanOrEqual(jerkLimit / 30 + 0.000_001);
+        }
+        previousClearance.set(agent.id, agent.signalCleared);
+        previousAcceleration.set(agent.id, agent.acceleration);
+      }
+    }
+    expect(crossings.car).toBeGreaterThan(0);
+    expect(crossings.bus).toBeGreaterThan(0);
+    expect(crossings.tram).toBeGreaterThan(0);
+    expect(simulation.redLightViolations).toBe(0);
+  }, 15_000);
 
   it('contains no pedestrian agents or pedestrian demand', () => {
     const simulation = new TrafficSimulation();

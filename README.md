@@ -8,7 +8,7 @@ Dołączony do repozytorium zestaw danych zawiera:
 - przycięte drogi, ciągi piesze i rowerowe, torowiska oraz pokrycie terenu z BDOT10k GUGiK;
 - 571 drzew odczytanych z publicznego modelu roślinności 3D GEOPOZ wraz z położeniem, identyfikatorem, gatunkiem, statusem, metodą pomiaru i wysokością;
 - 15 obrysów budynków BDOT10k oraz 11 oficjalnych punktów przystanków transportu zbiorowego;
-- autorską, deterministyczną symulację samochodów, autobusów i tramwajów.
+- autorską, deterministyczną symulację samochodów, autobusów i tramwajów z płynną interpolacją ruchu, kolejkami oraz bezpiecznymi fazami sygnalizacji.
 
 ## Uruchomienie lokalne
 

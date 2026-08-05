@@ -1,4 +1,4 @@
-import { TRAFFIC_NETWORK, polylineLength, samplePolyline } from './traffic-network.ts';
+import { TRAFFIC_NETWORK, polylineLength, sampleSmoothPolyline } from './traffic-network.ts';
 import type { ApproachId, TrafficMode, TrafficRoute, TurnKind } from './traffic-network.ts';
 import type { Point2 } from './types.ts';
 
@@ -6,13 +6,17 @@ export type TrafficDensity = 'low' | 'medium' | 'high';
 export type VehicleSignalState = 'red' | 'amber' | 'green';
 export type PedestrianSignalState = 'stop' | 'walk' | 'clearance';
 
+type SignalStage = 'green' | 'amber' | 'clearance' | 'transit-green' | 'transit-amber' | 'transit-clearance';
+
 export interface TrafficAgent {
   id: string;
   mode: TrafficMode;
   routeId: string;
   route: TrafficRoute;
   distance: number;
+  previousDistance: number;
   speed: number;
+  acceleration: number;
   desiredSpeed: number;
   scale: number;
   spawnAge: number;
@@ -22,6 +26,7 @@ export interface TrafficAgent {
   dwellRemaining: number;
   hasDwelled: boolean;
   priorityRequest: boolean;
+  signalCleared: boolean;
 }
 
 export interface AgentPose {
@@ -67,14 +72,21 @@ function signalApproach(group: string): ApproachId | undefined {
   return APPROACH_ORDER.find((approach) => group === `vehicle-${approach}` || group === `ped-${approach}`);
 }
 
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
 export class TrafficSimulation {
   readonly agents: TrafficAgent[] = [];
   density: TrafficDensity = 'medium';
   paused = false;
   elapsed = 0;
+  signalCrossings = 0;
+  redLightViolations = 0;
   private accumulator = 0;
   private activeApproachIndex = 0;
-  private signalStage: 'green' | 'amber' | 'all-red' = 'green';
+  private activeTransitGroup: string | undefined;
+  private signalStage: SignalStage = 'green';
   private stageElapsed = 0;
   private greenDuration = 12;
   private seed = 2180;
@@ -111,17 +123,17 @@ export class TrafficSimulation {
     this.elapsed = 0;
     this.accumulator = 0;
     this.activeApproachIndex = 0;
+    this.activeTransitGroup = undefined;
     this.signalStage = 'green';
     this.stageElapsed = 0;
     this.greenDuration = 12;
+    this.signalCrossings = 0;
+    this.redLightViolations = 0;
     const random = new SeededRandom(this.seed);
     const targets = TARGETS[this.density];
-    const carRoutes = TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'car');
-    const busRoutes = TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'bus');
-    const tramRoutes = TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'tram');
-    this.spawnMode('car', targets.cars, carRoutes, random);
-    this.spawnMode('bus', targets.buses, busRoutes, random);
-    this.spawnMode('tram', targets.trams, tramRoutes, random);
+    this.spawnMode('car', targets.cars, TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'car'), random);
+    this.spawnMode('bus', targets.buses, TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'bus'), random);
+    this.spawnMode('tram', targets.trams, TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'tram'), random);
   }
 
   private spawnMode(mode: TrafficMode, count: number, routes: TrafficRoute[], random: SeededRandom): void {
@@ -132,17 +144,19 @@ export class TrafficSimulation {
       const spacing = Math.max(modeLength(mode) + 2, length / Math.max(1, Math.ceil(count / routes.length)));
       const distance = (laneSlot * spacing + random.next() * Math.min(3, spacing * 0.2)) % Math.max(1, length - 1);
       const desiredSpeed = mode === 'tram'
-          ? 8.5 + random.next() * 1.5
-          : mode === 'bus'
-            ? 7.2 + random.next() * 1.4
-            : 7.8 + random.next() * 2.5;
+        ? 8.5 + random.next() * 1.5
+        : mode === 'bus'
+          ? 7.2 + random.next() * 1.4
+          : 7.8 + random.next() * 2.5;
       this.agents.push({
         id: `${mode}-${index + 1}`,
         mode,
         routeId: route.id,
         route,
         distance,
+        previousDistance: distance,
         speed: desiredSpeed * 0.72,
+        acceleration: 0,
         desiredSpeed,
         scale: 1,
         spawnAge: 0.6,
@@ -152,6 +166,7 @@ export class TrafficSimulation {
         dwellRemaining: 0,
         hasDwelled: false,
         priorityRequest: false,
+        signalCleared: route.stopAt === undefined || distance >= route.stopAt,
       });
     }
   }
@@ -168,133 +183,222 @@ export class TrafficSimulation {
   private step(dt: number): void {
     this.elapsed += dt;
     this.updateSignals(dt);
-    const routeOccupants = new Map<string, TrafficAgent[]>();
-    for (const agent of this.agents) {
-      const occupants = routeOccupants.get(agent.routeId) ?? [];
-      occupants.push(agent);
-      routeOccupants.set(agent.routeId, occupants);
-    }
-    for (const occupants of routeOccupants.values()) occupants.sort((a, b) => b.distance - a.distance);
-
-    for (const occupants of routeOccupants.values()) {
-      for (let index = 0; index < occupants.length; index += 1) {
-        const agent = occupants[index];
-        const leader = occupants[index - 1];
-        this.stepAgent(agent, leader, dt);
-      }
-    }
+    const poses = new Map(this.agents.map((agent) => [agent.id, sampleSmoothPolyline(agent.route.points, agent.distance)]));
+    const leaderGaps = new Map(this.agents.map((agent) => [agent.id, this.nearestLeaderGap(agent, poses)]));
+    for (const agent of this.agents) this.stepAgent(agent, leaderGaps.get(agent.id), dt);
   }
 
-  private stepAgent(agent: TrafficAgent, leader: TrafficAgent | undefined, dt: number): void {
+  private nearestLeaderGap(agent: TrafficAgent, poses: Map<string, { point: Point2; heading: number }>): number | undefined {
+    const pose = poses.get(agent.id);
+    if (!pose) return undefined;
+    const forward: Point2 = [Math.cos(pose.heading), Math.sin(pose.heading)];
+    const side: Point2 = [-forward[1], forward[0]];
+    let nearest = Number.POSITIVE_INFINITY;
+    for (const candidate of this.agents) {
+      if (candidate === agent || (candidate.mode === 'tram') !== (agent.mode === 'tram')) continue;
+      const candidatePose = poses.get(candidate.id);
+      if (!candidatePose) continue;
+      const headingAlignment = Math.cos(candidatePose.heading - pose.heading);
+      if (headingAlignment < 0.78) continue;
+      const dx = candidatePose.point[0] - pose.point[0];
+      const dy = candidatePose.point[1] - pose.point[1];
+      const ahead = dx * forward[0] + dy * forward[1];
+      const lateral = Math.abs(dx * side[0] + dy * side[1]);
+      const lateralLimit = agent.mode === 'tram' ? 1.35 : 1.5;
+      if (ahead <= 0 || ahead > 45 || lateral > lateralLimit) continue;
+      nearest = Math.min(nearest, ahead - (agent.length + candidate.length) / 2);
+    }
+    return Number.isFinite(nearest) ? nearest : undefined;
+  }
+
+  private stepAgent(agent: TrafficAgent, leaderGap: number | undefined, dt: number): void {
     const routeLength = polylineLength(agent.route.points);
+    agent.previousDistance = agent.distance;
     agent.spawnAge += dt;
     const easeProgress = Math.min(1, agent.spawnAge / 0.6);
     agent.scale = 1 - (1 - easeProgress) ** 3;
+    agent.priorityRequest = false;
 
     if (agent.dwellRemaining > 0) {
       agent.dwellRemaining = Math.max(0, agent.dwellRemaining - dt);
       agent.speed = 0;
-      agent.priorityRequest = true;
+      agent.acceleration = 0;
       return;
     }
-
-    const dwellPoint = agent.route.dwellAt ?? routeLength * 0.46;
-    if ((agent.mode === 'bus' || agent.mode === 'tram') && !agent.hasDwelled && agent.distance < dwellPoint && agent.distance + agent.speed * dt >= dwellPoint) {
-      const dwellVariation = ((agent.id.charCodeAt(agent.id.length - 1) + this.seed) % 7);
-      agent.distance = dwellPoint;
-      agent.dwellRemaining = 8 + dwellVariation;
-      agent.hasDwelled = true;
-      agent.speed = 0;
-      agent.priorityRequest = true;
-      return;
-    }
-    agent.priorityRequest = false;
 
     let targetSpeed = agent.desiredSpeed;
-    const approach = signalApproach(agent.route.signalGroup);
+    const dwellPoint = agent.route.dwellAt ?? routeLength * 0.46;
+    if ((agent.mode === 'bus' || agent.mode === 'tram') && !agent.hasDwelled && agent.distance < dwellPoint) {
+      const distanceToStop = dwellPoint - agent.distance;
+      if (distanceToStop < 24) targetSpeed = Math.min(targetSpeed, Math.sqrt(2 * 1.45 * Math.max(0, distanceToStop - 0.35)));
+      if (distanceToStop <= 0.45 && agent.speed < 0.75) {
+        const dwellVariation = (agent.id.charCodeAt(agent.id.length - 1) + this.seed) % 7;
+        agent.distance = dwellPoint;
+        agent.previousDistance = dwellPoint;
+        agent.dwellRemaining = 8 + dwellVariation;
+        agent.hasDwelled = true;
+        agent.speed = 0;
+        agent.acceleration = 0;
+        return;
+      }
+    }
+
     const stopAt = agent.route.stopAt;
-    const hasGreen = this.vehicleSignal(agent.route.signalGroup) === 'green';
-    const isControlled = approach !== undefined || agent.route.signalGroup.startsWith('transit-');
-    if (isControlled && stopAt !== undefined && !hasGreen && agent.distance < stopAt) {
+    const signalState = this.vehicleSignal(agent.route.signalGroup);
+    let mayCrossSignal = signalState === 'green';
+    if (!agent.signalCleared && stopAt !== undefined && agent.distance < stopAt) {
       const distanceToLine = stopAt - agent.distance;
-      targetSpeed = Math.min(targetSpeed, Math.max(0, (distanceToLine - 0.8) * 0.55));
-      if ((agent.mode === 'bus' || agent.mode === 'tram') && distanceToLine < 45) agent.priorityRequest = true;
+      const comfortableDeceleration = agent.mode === 'tram' ? 1.25 : agent.mode === 'bus' ? 2 : 2.8;
+      const brakingDistance = agent.speed * 0.45 + (agent.speed * agent.speed) / (2 * comfortableDeceleration);
+      const amberCommit = signalState === 'amber' && brakingDistance >= Math.max(0, distanceToLine - 0.8);
+      mayCrossSignal = signalState === 'green' || amberCommit;
+      if (!mayCrossSignal) {
+        targetSpeed = Math.min(targetSpeed, Math.sqrt(2 * comfortableDeceleration * Math.max(0, distanceToLine - 0.8)));
+      }
+      if ((agent.mode === 'bus' || agent.mode === 'tram') && distanceToLine < 55) agent.priorityRequest = true;
     }
 
-    if (leader) {
-      const safeGap = agent.length * 0.6 + Math.max(1.2, agent.speed * 0.85);
-      const gap = leader.distance - agent.distance - leader.length;
-      if (gap < safeGap) targetSpeed = Math.min(targetSpeed, Math.max(0, (gap - 0.3) * 0.75));
+    if (leaderGap !== undefined) {
+      const safeGap = 1.4 + agent.speed * (agent.mode === 'tram' ? 1.1 : 0.9);
+      if (leaderGap < safeGap) targetSpeed = Math.min(targetSpeed, Math.max(0, (leaderGap - 0.35) / 1.05));
     }
 
-    const acceleration = targetSpeed > agent.speed ? 1.6 : 3.8;
-    agent.speed += Math.sign(targetSpeed - agent.speed) * Math.min(Math.abs(targetSpeed - agent.speed), acceleration * dt);
-    agent.distance += Math.max(0, agent.speed) * dt;
+    const maximumAcceleration = agent.mode === 'car' ? 1.7 : agent.mode === 'bus' ? 1.15 : 0.95;
+    const maximumDeceleration = agent.mode === 'tram' ? 1.5 : agent.mode === 'bus' ? 2.4 : 3.5;
+    const maximumJerk = agent.mode === 'car' ? 4 : agent.mode === 'bus' ? 1.8 : 1.25;
+    const desiredAcceleration = clamp((targetSpeed - agent.speed) / 0.7, -maximumDeceleration, maximumAcceleration);
+    agent.acceleration += clamp(desiredAcceleration - agent.acceleration, -maximumJerk * dt, maximumJerk * dt);
+    const nextSpeed = clamp(agent.speed + agent.acceleration * dt, 0, agent.desiredSpeed);
+    let advance = Math.max(0, (agent.speed + nextSpeed) * 0.5 * dt);
+    if (leaderGap !== undefined) advance = Math.min(advance, Math.max(0, leaderGap - 0.25));
+    let nextDistance = agent.distance + advance;
+    agent.speed = nextSpeed;
+
+    if (!agent.signalCleared && stopAt !== undefined && nextDistance >= stopAt) {
+      if (mayCrossSignal) {
+        agent.signalCleared = true;
+        this.signalCrossings += 1;
+      } else {
+        nextDistance = Math.max(agent.distance, stopAt - 0.8);
+        agent.acceleration = 0;
+        agent.speed = 0;
+      }
+    }
+    agent.distance = nextDistance;
+
     if (agent.distance >= routeLength) {
       agent.distance %= routeLength;
+      agent.previousDistance = agent.distance;
       agent.spawnAge = 0;
       agent.scale = 0;
       agent.hasDwelled = false;
       agent.dwellRemaining = 0;
+      agent.signalCleared = agent.route.stopAt === undefined;
     }
+    if (!agent.signalCleared && stopAt !== undefined && agent.distance > stopAt + 0.001) this.redLightViolations += 1;
   }
 
   private updateSignals(dt: number): void {
     this.stageElapsed += dt;
-    const stageDuration = this.signalStage === 'green' ? this.greenDuration : this.signalStage === 'amber' ? 3 : 1.5;
-    if (this.stageElapsed < stageDuration) return;
-    this.stageElapsed -= stageDuration;
+    const durations: Record<SignalStage, number> = {
+      green: this.greenDuration,
+      amber: 3,
+      clearance: 1.5,
+      'transit-green': 6,
+      'transit-amber': 3,
+      'transit-clearance': 1.5,
+    };
+    if (this.stageElapsed < durations[this.signalStage]) return;
+    this.stageElapsed -= durations[this.signalStage];
     if (this.signalStage === 'green') {
       this.signalStage = 'amber';
     } else if (this.signalStage === 'amber') {
-      this.signalStage = 'all-red';
+      this.signalStage = 'clearance';
+    } else if (this.signalStage === 'clearance') {
+      this.activeTransitGroup = this.requestedTransitGroup();
+      if (this.activeTransitGroup) this.signalStage = 'transit-green';
+      else this.beginNextVehiclePhase();
+    } else if (this.signalStage === 'transit-green') {
+      this.signalStage = 'transit-amber';
+    } else if (this.signalStage === 'transit-amber') {
+      this.signalStage = 'transit-clearance';
     } else {
-      this.activeApproachIndex = (this.activeApproachIndex + 1) % APPROACH_ORDER.length;
-      this.signalStage = 'green';
-      const group = `vehicle-${this.activeApproach}`;
-      const queue = this.agents.filter((agent) => agent.route.signalGroup === group && agent.speed < 0.5).length;
-      const priority = this.agents.some((agent) => agent.route.signalGroup === group && agent.priorityRequest);
-      this.greenDuration = 11 + Math.min(5, Math.ceil(queue / 3)) + (priority ? 2 : 0);
+      this.activeTransitGroup = undefined;
+      this.beginNextVehiclePhase();
     }
+  }
+
+  private requestedTransitGroup(): string | undefined {
+    const requests = this.agents
+      .filter((agent) => agent.mode === 'tram' && !agent.signalCleared && agent.route.stopAt !== undefined && agent.distance < agent.route.stopAt)
+      .map((agent) => ({ group: agent.route.signalGroup, distance: (agent.route.stopAt ?? 0) - agent.distance }))
+      .filter((request) => request.distance < 60)
+      .sort((a, b) => a.distance - b.distance || a.group.localeCompare(b.group));
+    return requests[0]?.group;
+  }
+
+  private beginNextVehiclePhase(): void {
+    this.activeApproachIndex = (this.activeApproachIndex + 1) % APPROACH_ORDER.length;
+    this.signalStage = 'green';
+    const group = `vehicle-${this.activeApproach}`;
+    const queue = this.agents.filter((agent) => agent.route.signalGroup === group && !agent.signalCleared && agent.speed < 0.5).length;
+    const priority = this.agents.some((agent) => agent.route.signalGroup === group && agent.priorityRequest);
+    this.greenDuration = 11 + Math.min(5, Math.ceil(queue / 3)) + (priority ? 2 : 0);
   }
 
   vehicleSignal(group: string): VehicleSignalState {
     if (group.startsWith('transit-')) {
-      const activeTransit = `transit-${(this.activeApproachIndex % 2) + 1}`;
-      return this.signalStage === 'all-red' && group === activeTransit ? 'green' : 'red';
+      if (group !== this.activeTransitGroup) return 'red';
+      if (this.signalStage === 'transit-green') return 'green';
+      if (this.signalStage === 'transit-amber') return 'amber';
+      return 'red';
     }
     if (group !== `vehicle-${this.activeApproach}`) return 'red';
-    return this.signalStage === 'green' ? 'green' : this.signalStage === 'amber' ? 'amber' : 'red';
+    if (this.signalStage === 'green') return 'green';
+    if (this.signalStage === 'amber') return 'amber';
+    return 'red';
   }
 
   pedestrianSignal(group: string): PedestrianSignalState {
     const approach = signalApproach(group);
-    if (!approach || approach === this.activeApproach) return 'stop';
-    if (this.signalStage === 'amber') return 'clearance';
-    return 'walk';
+    if (!approach || this.signalStage !== 'green') return this.signalStage === 'amber' ? 'clearance' : 'stop';
+    return approach === this.activeApproach ? 'stop' : 'walk';
   }
 
   greenGroups(): string[] {
     const groups: string[] = [];
     if (this.signalStage === 'green') groups.push(`vehicle-${this.activeApproach}`);
-    if (this.signalStage === 'all-red') groups.push(`transit-${(this.activeApproachIndex % 2) + 1}`);
+    if (this.signalStage === 'transit-green' && this.activeTransitGroup) groups.push(this.activeTransitGroup);
     for (const approach of APPROACH_ORDER) if (this.pedestrianSignal(`ped-${approach}`) === 'walk') groups.push(`ped-${approach}`);
     return groups;
   }
 
   pose(agent: TrafficAgent): AgentPose {
     const routeLength = polylineLength(agent.route.points);
-    const exitProgress = Math.min(1, Math.max(0, (routeLength - agent.distance) / Math.max(0.1, agent.desiredSpeed * 0.6)));
+    const interpolation = clamp(this.accumulator / FIXED_STEP, 0, 1);
+    const displayDistance = agent.previousDistance <= agent.distance
+      ? agent.previousDistance + (agent.distance - agent.previousDistance) * interpolation
+      : agent.distance;
+    const exitProgress = Math.min(1, Math.max(0, (routeLength - displayDistance) / Math.max(0.1, agent.desiredSpeed * 0.6)));
     const exitEase = 1 - (1 - exitProgress) ** 3;
-    return { ...samplePolyline(agent.route.points, agent.distance), scale: Math.min(agent.scale, exitEase) };
+    return { ...sampleSmoothPolyline(agent.route.points, displayDistance), scale: Math.min(agent.scale, exitEase) };
   }
 
   snapshot(): string {
     return JSON.stringify({
       density: this.density,
       elapsed: Number(this.elapsed.toFixed(3)),
-      signal: [this.activeApproach, this.signalStage, Number(this.stageElapsed.toFixed(3))],
-      agents: this.agents.map((agent) => [agent.id, agent.routeId, Number(agent.distance.toFixed(3)), Number(agent.speed.toFixed(3)), Number(agent.dwellRemaining.toFixed(3))]),
+      signal: [this.activeApproach, this.signalStage, this.activeTransitGroup, Number(this.stageElapsed.toFixed(3))],
+      crossings: [this.signalCrossings, this.redLightViolations],
+      agents: this.agents.map((agent) => [
+        agent.id,
+        agent.routeId,
+        Number(agent.distance.toFixed(3)),
+        Number(agent.speed.toFixed(3)),
+        Number(agent.acceleration.toFixed(3)),
+        Number(agent.dwellRemaining.toFixed(3)),
+        agent.signalCleared,
+      ]),
     });
   }
 }

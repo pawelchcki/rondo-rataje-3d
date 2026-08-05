@@ -425,4 +425,13 @@ export function samplePolyline(points: Point2[], distance: number): { point: Poi
   return { point: points.at(-1) ?? [0, 0], heading: 0 };
 }
 
+export function sampleSmoothPolyline(points: Point2[], distance: number, lookAhead = 2.4): { point: Point2; heading: number } {
+  const sample = samplePolyline(points, distance);
+  const before = samplePolyline(points, Math.max(0, distance - lookAhead)).point;
+  const after = samplePolyline(points, Math.min(polylineLength(points), distance + lookAhead)).point;
+  const dx = after[0] - before[0];
+  const dy = after[1] - before[1];
+  return { point: sample.point, heading: Math.hypot(dx, dy) > 0.001 ? Math.atan2(dy, dx) : sample.heading };
+}
+
 export const TRAFFIC_NETWORK = buildNetwork();

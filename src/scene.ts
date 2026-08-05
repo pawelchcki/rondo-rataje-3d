@@ -21,6 +21,8 @@ export interface SceneApi {
   readonly activeAgentCounts: AgentCounts;
   readonly simulationTime: number;
   readonly activeSignalGroups: string[];
+  readonly trafficSignalCrossings: number;
+  readonly trafficRedLightViolations: number;
   setLayer(name: LayerName, visible: boolean): void;
   setView(name: 'oblique' | 'top'): void;
   setExaggeration(value: 1 | 3): void;
@@ -150,6 +152,8 @@ export class RatajeScene {
       get activeAgentCounts() { return map.trafficSimulation.counts; },
       get simulationTime() { return map.trafficSimulation.elapsed; },
       get activeSignalGroups() { return map.trafficSimulation.greenGroups(); },
+      get trafficSignalCrossings() { return map.trafficSimulation.signalCrossings; },
+      get trafficRedLightViolations() { return map.trafficSimulation.redLightViolations; },
       setLayer: (name, visible) => this.setLayer(name, visible),
       setView: (name) => this.setView(name),
       setExaggeration: (value) => this.setExaggeration(value),

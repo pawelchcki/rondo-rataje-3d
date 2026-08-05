@@ -62,6 +62,7 @@ test('renders measured terrain and trees and responds to controls', async ({ pag
     return api?.activeSignalGroups.join(',');
   });
   expect(signalAfter).not.toBe(signalBefore);
+  expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.trafficRedLightViolations)).toBe(0);
 
   await page.getByRole('button', { name: 'Duże' }).click();
   expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.activeAgentCounts)).toEqual({ cars: 70, buses: 7, trams: 3 });
