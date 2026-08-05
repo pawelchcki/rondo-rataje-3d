@@ -125,6 +125,29 @@ h1 {
   font-size: 9px;
 }
 
+.control-caption {
+  display: block;
+  margin-top: 9px;
+  color: #697169;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.priority-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.priority-buttons button {
+  min-height: 30px;
+  padding-inline: 3px;
+  font-size: 8px;
+}
+
 button[aria-pressed="true"] {
   color: #eef0e9;
   background: #496251;

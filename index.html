@@ -36,6 +36,11 @@
             <button type="button" data-density="medium" aria-pressed="true">Średnie</button>
             <button type="button" data-density="high" aria-pressed="false">Duże</button>
           </div>
+          <span class="control-caption">Priorytet tramwajów</span>
+          <div class="priority-buttons" aria-label="Priorytet tramwajów">
+            <button type="button" data-tram-priority="absolute" aria-pressed="true" title="Tramwaj przerywa bieżący cykl po bezpiecznym czasie minimalnym">Bezwzględny</button>
+            <button type="button" data-tram-priority="standard" aria-pressed="false" title="Tramwaj czeka na dwa punkty kontroli sygnału">Zwykły 2×</button>
+          </div>
         </fieldset>
         <label class="exaggeration"><input type="checkbox" data-action="exaggerate" /><span>Teren ×3</span></label>
       </section>

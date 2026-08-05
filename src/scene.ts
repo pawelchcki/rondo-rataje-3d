@@ -4,7 +4,7 @@ import { FEATURE_OFFSET_STEP, SURFACE_OFFSETS, createBuilding, createLandCover, 
 import { TerrainSampler, createTerrain } from './terrain.ts';
 import { TrafficRenderer } from './traffic-renderer.ts';
 import { TrafficSimulation } from './traffic-simulation.ts';
-import type { AgentCounts, TrafficDensity } from './traffic-simulation.ts';
+import type { AgentCounts, TrafficDensity, TramPriorityMode } from './traffic-simulation.ts';
 import type { BuildingRecord, SceneManifest, TransitStopRecord, TransportFeature, TreeKind, TreeRecord } from './types.ts';
 
 type LayerName = 'terrain' | 'transport' | 'buildings' | 'stations' | 'trees' | 'traffic';
@@ -23,12 +23,23 @@ export interface SceneApi {
   readonly activeSignalGroups: string[];
   readonly trafficSignalCrossings: number;
   readonly trafficRedLightViolations: number;
+  readonly tramPriorityMode: TramPriorityMode;
+  readonly tramSignalWaitingSeconds: number;
+  readonly trafficTelemetry: Array<{
+    id: string;
+    mode: 'car' | 'bus' | 'tram';
+    visibleSeconds: number;
+    signalWaitSeconds: number;
+    signalWaitCount: number;
+    passengers: number;
+  }>;
   setLayer(name: LayerName, visible: boolean): void;
   setView(name: 'oblique' | 'top'): void;
   setExaggeration(value: 1 | 3): void;
   setTrafficPaused(paused: boolean): void;
   setTrafficVisible(visible: boolean): void;
   setTrafficDensity(density: TrafficDensity): void;
+  setTramPriorityMode(mode: TramPriorityMode): void;
   resetTraffic(seed?: number): void;
   stepTraffic(seconds: number): void;
 }
@@ -154,15 +165,28 @@ export class RatajeScene {
       get activeSignalGroups() { return map.trafficSimulation.greenGroups(); },
       get trafficSignalCrossings() { return map.trafficSimulation.signalCrossings; },
       get trafficRedLightViolations() { return map.trafficSimulation.redLightViolations; },
+      get tramPriorityMode() { return map.trafficSimulation.tramPriority; },
+      get tramSignalWaitingSeconds() { return map.trafficSimulation.tramSignalWaitingSeconds; },
+      get trafficTelemetry() {
+        return map.trafficSimulation.agents.map((agent) => ({
+          id: agent.id,
+          mode: agent.mode,
+          visibleSeconds: agent.visibleSeconds,
+          signalWaitSeconds: agent.signalWaitSeconds,
+          signalWaitCount: agent.signalWaitCount,
+          passengers: agent.passengerCount,
+        }));
+      },
       setLayer: (name, visible) => this.setLayer(name, visible),
       setView: (name) => this.setView(name),
       setExaggeration: (value) => this.setExaggeration(value),
       setTrafficPaused: (paused) => this.trafficSimulation.setPaused(paused),
       setTrafficVisible: (visible) => this.setLayer('traffic', visible),
       setTrafficDensity: (density) => this.trafficSimulation.setDensity(density),
+      setTramPriorityMode: (mode) => this.trafficSimulation.setTramPriority(mode),
       resetTraffic: (seed) => this.trafficSimulation.reset(seed),
       stepTraffic: (seconds) => {
-        for (let remaining = Math.max(0, seconds); remaining > 0; remaining -= 0.25) this.trafficSimulation.advance(Math.min(0.25, remaining));
+        for (let remaining = Math.max(0, seconds); remaining > 0; remaining -= 1 / 60) this.trafficSimulation.advance(Math.min(1 / 60, remaining));
         this.trafficRenderer.sync();
       },
     };

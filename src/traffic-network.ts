@@ -32,6 +32,7 @@ export interface TrafficRoute {
   approach?: ApproachId;
   stopAt?: number;
   dwellAt?: number;
+  signalStops?: Array<{ distance: number; signalGroup: string }>;
 }
 
 export interface TrafficCrossing {
@@ -307,9 +308,16 @@ function buildNetwork(): TrafficNetwork {
       lanes.push({ id, kind: 'tram', points: routePoints, speedLimit: 11.1, successors: [], permittedModes: ['tram'] });
       const stopPosition: Point2 = index === 0 ? [-31, -89] : [43, 106];
       const junctionDistance = nearestDistanceOnPolyline(routePoints, [-4.2, -16.4]);
+      const firstSignal = Math.max(2, junctionDistance - 12);
+      const secondSignal = Math.min(polylineLength(routePoints) - 2, junctionDistance + 10);
       routes.push({
-        id, mode: 'tram', points: routePoints, laneIds: [id], turn: 'transit', signalGroup: `transit-${index + 1}`,
-        stopAt: Math.max(2, junctionDistance - 12), dwellAt: nearestDistanceOnPolyline(routePoints, stopPosition),
+        id, mode: 'tram', points: routePoints, laneIds: [id], turn: 'transit', signalGroup: `transit-${index + 1}-entry`,
+        stopAt: firstSignal,
+        signalStops: [
+          { distance: firstSignal, signalGroup: `transit-${index + 1}-entry` },
+          { distance: secondSignal, signalGroup: `transit-${index + 1}-ring` },
+        ],
+        dwellAt: nearestDistanceOnPolyline(routePoints, stopPosition),
       });
     }
   });
@@ -338,14 +346,14 @@ function buildNetwork(): TrafficNetwork {
   }
 
   const vehicleGroups = APPROACHES.map((item) => `vehicle-${item.id}`);
+  const transitGroups = ['transit-1-entry', 'transit-1-ring', 'transit-2-entry', 'transit-2-ring'];
   const movementConflicts: Record<string, string[]> = {};
   for (const approach of APPROACHES) {
     const vehicle = `vehicle-${approach.id}`;
-    movementConflicts[vehicle] = [...vehicleGroups.filter((group) => group !== vehicle), `ped-${approach.id}`, 'transit-1', 'transit-2'];
+    movementConflicts[vehicle] = [...vehicleGroups.filter((group) => group !== vehicle), `ped-${approach.id}`, ...transitGroups];
     movementConflicts[`ped-${approach.id}`] = [vehicle];
   }
-  movementConflicts['transit-1'] = [...vehicleGroups, 'transit-2'];
-  movementConflicts['transit-2'] = [...vehicleGroups, 'transit-1'];
+  for (const transit of transitGroups) movementConflicts[transit] = [...vehicleGroups, ...transitGroups.filter((group) => group !== transit)];
 
   return {
     schema: 'rondo-rataje-authored-traffic',

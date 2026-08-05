@@ -54,6 +54,16 @@ try {
       updateTrafficCount();
     });
   });
+  document.querySelectorAll<HTMLButtonElement>('[data-tram-priority]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const mode = button.dataset.tramPriority;
+      if (mode !== 'absolute' && mode !== 'standard') return;
+      map.api.setTramPriorityMode(mode);
+      document.querySelectorAll<HTMLButtonElement>('[data-tram-priority]').forEach((candidate) => {
+        candidate.setAttribute('aria-pressed', String(candidate === button));
+      });
+    });
+  });
 } catch (error) {
   console.error(error);
   status.textContent = error instanceof Error ? error.message : 'Nie udało się wczytać sceny.';

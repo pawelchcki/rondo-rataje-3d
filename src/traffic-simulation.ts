@@ -3,6 +3,7 @@ import type { ApproachId, TrafficMode, TrafficRoute, TurnKind } from './traffic-
 import type { Point2 } from './types.ts';
 
 export type TrafficDensity = 'low' | 'medium' | 'high';
+export type TramPriorityMode = 'absolute' | 'standard';
 export type VehicleSignalState = 'red' | 'amber' | 'green';
 export type PedestrianSignalState = 'stop' | 'walk' | 'clearance';
 
@@ -27,6 +28,12 @@ export interface TrafficAgent {
   hasDwelled: boolean;
   priorityRequest: boolean;
   signalCleared: boolean;
+  signalCheckpointIndex: number;
+  visibleSeconds: number;
+  signalWaitSeconds: number;
+  signalWaitCount: number;
+  waitingAtSignal: boolean;
+  passengerCount: number;
 }
 
 export interface AgentPose {
@@ -76,16 +83,30 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
+function signalCheckpoints(route: TrafficRoute): Array<{ distance: number; signalGroup: string }> {
+  if (route.signalStops) return route.signalStops;
+  return route.stopAt === undefined ? [] : [{ distance: route.stopAt, signalGroup: route.signalGroup }];
+}
+
+function passengerEstimate(mode: TrafficMode, random: SeededRandom): number {
+  if (mode === 'tram') return 35 + Math.floor(random.next() * 146);
+  if (mode === 'bus') return 12 + Math.floor(random.next() * 69);
+  return 1 + Math.floor(random.next() * 4);
+}
+
 export class TrafficSimulation {
   readonly agents: TrafficAgent[] = [];
   density: TrafficDensity = 'medium';
+  tramPriority: TramPriorityMode = 'absolute';
   paused = false;
   elapsed = 0;
   signalCrossings = 0;
   redLightViolations = 0;
+  tramSignalWaitingSeconds = 0;
   private accumulator = 0;
   private activeApproachIndex = 0;
   private activeTransitGroup: string | undefined;
+  private pendingTransitGroup: string | undefined;
   private signalStage: SignalStage = 'green';
   private stageElapsed = 0;
   private greenDuration = 12;
@@ -107,6 +128,10 @@ export class TrafficSimulation {
     return APPROACH_ORDER[this.activeApproachIndex];
   }
 
+  nextSignalStop(agent: TrafficAgent): { distance: number; signalGroup: string } | undefined {
+    return signalCheckpoints(agent.route)[agent.signalCheckpointIndex];
+  }
+
   setPaused(paused: boolean): void {
     this.paused = paused;
   }
@@ -117,6 +142,12 @@ export class TrafficSimulation {
     this.reset(this.seed);
   }
 
+  setTramPriority(mode: TramPriorityMode): void {
+    if (this.tramPriority === mode) return;
+    this.tramPriority = mode;
+    this.reset(this.seed);
+  }
+
   reset(seed = 2180): void {
     this.seed = seed >>> 0;
     this.agents.length = 0;
@@ -124,11 +155,13 @@ export class TrafficSimulation {
     this.accumulator = 0;
     this.activeApproachIndex = 0;
     this.activeTransitGroup = undefined;
+    this.pendingTransitGroup = undefined;
     this.signalStage = 'green';
     this.stageElapsed = 0;
     this.greenDuration = 12;
     this.signalCrossings = 0;
     this.redLightViolations = 0;
+    this.tramSignalWaitingSeconds = 0;
     const random = new SeededRandom(this.seed);
     const targets = TARGETS[this.density];
     this.spawnMode('car', targets.cars, TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'car'), random);
@@ -148,6 +181,8 @@ export class TrafficSimulation {
         : mode === 'bus'
           ? 7.2 + random.next() * 1.4
           : 7.8 + random.next() * 2.5;
+      const checkpoints = signalCheckpoints(route);
+      const signalCheckpointIndex = checkpoints.filter((checkpoint) => checkpoint.distance <= distance).length;
       this.agents.push({
         id: `${mode}-${index + 1}`,
         mode,
@@ -166,7 +201,13 @@ export class TrafficSimulation {
         dwellRemaining: 0,
         hasDwelled: false,
         priorityRequest: false,
-        signalCleared: route.stopAt === undefined || distance >= route.stopAt,
+        signalCleared: signalCheckpointIndex >= checkpoints.length,
+        signalCheckpointIndex,
+        visibleSeconds: 0,
+        signalWaitSeconds: 0,
+        signalWaitCount: 0,
+        waitingAtSignal: false,
+        passengerCount: passengerEstimate(mode, random),
       });
     }
   }
@@ -214,6 +255,7 @@ export class TrafficSimulation {
   private stepAgent(agent: TrafficAgent, leaderGap: number | undefined, dt: number): void {
     const routeLength = polylineLength(agent.route.points);
     agent.previousDistance = agent.distance;
+    agent.visibleSeconds += dt;
     agent.spawnAge += dt;
     const easeProgress = Math.min(1, agent.spawnAge / 0.6);
     agent.scale = 1 - (1 - easeProgress) ** 3;
@@ -243,8 +285,11 @@ export class TrafficSimulation {
       }
     }
 
-    const stopAt = agent.route.stopAt;
-    const signalState = this.vehicleSignal(agent.route.signalGroup);
+    const checkpoints = signalCheckpoints(agent.route);
+    const checkpoint = checkpoints[agent.signalCheckpointIndex];
+    const stopAt = checkpoint?.distance;
+    const signalGroup = checkpoint?.signalGroup ?? agent.route.signalGroup;
+    const signalState = this.vehicleSignal(signalGroup);
     let mayCrossSignal = signalState === 'green';
     if (!agent.signalCleared && stopAt !== undefined && agent.distance < stopAt) {
       const distanceToLine = stopAt - agent.distance;
@@ -254,6 +299,14 @@ export class TrafficSimulation {
       mayCrossSignal = signalState === 'green' || amberCommit;
       if (!mayCrossSignal) {
         targetSpeed = Math.min(targetSpeed, Math.sqrt(2 * comfortableDeceleration * Math.max(0, distanceToLine - 0.8)));
+        if (agent.mode === 'tram' && distanceToLine < 2.5 && agent.speed < 0.55) {
+          if (!agent.waitingAtSignal) agent.signalWaitCount += 1;
+          agent.waitingAtSignal = true;
+          agent.signalWaitSeconds += dt;
+          this.tramSignalWaitingSeconds += dt;
+        }
+      } else if (agent.mode === 'tram') {
+        agent.waitingAtSignal = false;
       }
       if ((agent.mode === 'bus' || agent.mode === 'tram') && distanceToLine < 55) agent.priorityRequest = true;
     }
@@ -276,7 +329,9 @@ export class TrafficSimulation {
 
     if (!agent.signalCleared && stopAt !== undefined && nextDistance >= stopAt) {
       if (mayCrossSignal) {
-        agent.signalCleared = true;
+        agent.signalCheckpointIndex += 1;
+        agent.signalCleared = agent.signalCheckpointIndex >= checkpoints.length;
+        agent.waitingAtSignal = false;
         this.signalCrossings += 1;
       } else {
         nextDistance = Math.max(agent.distance, stopAt - 0.8);
@@ -293,18 +348,33 @@ export class TrafficSimulation {
       agent.scale = 0;
       agent.hasDwelled = false;
       agent.dwellRemaining = 0;
-      agent.signalCleared = agent.route.stopAt === undefined;
+      agent.signalCheckpointIndex = 0;
+      agent.signalCleared = checkpoints.length === 0;
+      agent.visibleSeconds = 0;
+      agent.signalWaitSeconds = 0;
+      agent.signalWaitCount = 0;
+      agent.waitingAtSignal = false;
     }
-    if (!agent.signalCleared && stopAt !== undefined && agent.distance > stopAt + 0.001) this.redLightViolations += 1;
+    const nextCheckpoint = checkpoints[agent.signalCheckpointIndex];
+    if (!agent.signalCleared && nextCheckpoint && agent.distance > nextCheckpoint.distance + 0.001) this.redLightViolations += 1;
   }
 
   private updateSignals(dt: number): void {
     this.stageElapsed += dt;
+    if (this.tramPriority === 'absolute' && this.signalStage === 'green' && this.stageElapsed >= 4) {
+      const requestedGroup = this.requestedTransitGroup();
+      if (requestedGroup) {
+        this.pendingTransitGroup = requestedGroup;
+        this.signalStage = 'amber';
+        this.stageElapsed = 0;
+        return;
+      }
+    }
     const durations: Record<SignalStage, number> = {
       green: this.greenDuration,
       amber: 3,
       clearance: 1.5,
-      'transit-green': 6,
+      'transit-green': this.tramPriority === 'absolute' ? 12 : 6,
       'transit-amber': 3,
       'transit-clearance': 1.5,
     };
@@ -315,7 +385,8 @@ export class TrafficSimulation {
     } else if (this.signalStage === 'amber') {
       this.signalStage = 'clearance';
     } else if (this.signalStage === 'clearance') {
-      this.activeTransitGroup = this.requestedTransitGroup();
+      this.activeTransitGroup = this.pendingTransitGroup ?? this.requestedTransitGroup();
+      this.pendingTransitGroup = undefined;
       if (this.activeTransitGroup) this.signalStage = 'transit-green';
       else this.beginNextVehiclePhase();
     } else if (this.signalStage === 'transit-green') {
@@ -330,8 +401,12 @@ export class TrafficSimulation {
 
   private requestedTransitGroup(): string | undefined {
     const requests = this.agents
-      .filter((agent) => agent.mode === 'tram' && !agent.signalCleared && agent.route.stopAt !== undefined && agent.distance < agent.route.stopAt)
-      .map((agent) => ({ group: agent.route.signalGroup, distance: (agent.route.stopAt ?? 0) - agent.distance }))
+      .filter((agent) => agent.mode === 'tram' && !agent.signalCleared)
+      .map((agent) => {
+        const checkpoint = signalCheckpoints(agent.route)[agent.signalCheckpointIndex];
+        return checkpoint ? { group: checkpoint.signalGroup, distance: checkpoint.distance - agent.distance } : undefined;
+      })
+      .filter((request): request is { group: string; distance: number } => request !== undefined && request.distance > 0)
       .filter((request) => request.distance < 60)
       .sort((a, b) => a.distance - b.distance || a.group.localeCompare(b.group));
     return requests[0]?.group;
@@ -348,7 +423,11 @@ export class TrafficSimulation {
 
   vehicleSignal(group: string): VehicleSignalState {
     if (group.startsWith('transit-')) {
-      if (group !== this.activeTransitGroup) return 'red';
+      const corridor = (value: string | undefined): string | undefined => value?.match(/^transit-\d+/)?.[0];
+      const exactMatch = group === this.activeTransitGroup;
+      const absoluteCorridorMatch = this.tramPriority === 'absolute' && corridor(group) === corridor(this.activeTransitGroup);
+      const headMatchesCorridor = this.activeTransitGroup !== undefined && group === corridor(this.activeTransitGroup);
+      if (!exactMatch && !absoluteCorridorMatch && !headMatchesCorridor) return 'red';
       if (this.signalStage === 'transit-green') return 'green';
       if (this.signalStage === 'transit-amber') return 'amber';
       return 'red';
@@ -387,9 +466,10 @@ export class TrafficSimulation {
   snapshot(): string {
     return JSON.stringify({
       density: this.density,
+      tramPriority: this.tramPriority,
       elapsed: Number(this.elapsed.toFixed(3)),
       signal: [this.activeApproach, this.signalStage, this.activeTransitGroup, Number(this.stageElapsed.toFixed(3))],
-      crossings: [this.signalCrossings, this.redLightViolations],
+      crossings: [this.signalCrossings, this.redLightViolations, Number(this.tramSignalWaitingSeconds.toFixed(3))],
       agents: this.agents.map((agent) => [
         agent.id,
         agent.routeId,
@@ -398,6 +478,11 @@ export class TrafficSimulation {
         Number(agent.acceleration.toFixed(3)),
         Number(agent.dwellRemaining.toFixed(3)),
         agent.signalCleared,
+        agent.signalCheckpointIndex,
+        Number(agent.visibleSeconds.toFixed(3)),
+        Number(agent.signalWaitSeconds.toFixed(3)),
+        agent.signalWaitCount,
+        agent.passengerCount,
       ]),
     });
   }

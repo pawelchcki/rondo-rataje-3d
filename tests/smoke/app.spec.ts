@@ -64,6 +64,17 @@ test('renders measured terrain and trees and responds to controls', async ({ pag
   expect(signalAfter).not.toBe(signalBefore);
   expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.trafficRedLightViolations)).toBe(0);
 
+  await page.getByRole('button', { name: 'Zwykły 2×' }).click();
+  const comparison = await page.evaluate(() => {
+    const api = (window as RatajeWindow).__RONDO_RATAJE__;
+    api?.stepTraffic(1);
+    return { mode: api?.tramPriorityMode, telemetry: api?.trafficTelemetry };
+  });
+  expect(comparison.mode).toBe('standard');
+  expect(comparison.telemetry).toHaveLength(46);
+  expect(comparison.telemetry?.every((agent) => agent.visibleSeconds > 0 && agent.passengers >= 1)).toBe(true);
+  expect(comparison.telemetry?.filter((agent) => agent.mode === 'tram').every((agent) => agent.passengers >= 35)).toBe(true);
+
   await page.getByRole('button', { name: 'Duże' }).click();
   expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.activeAgentCounts)).toEqual({ cars: 70, buses: 7, trams: 3 });
   await page.getByRole('checkbox', { name: 'Ruch' }).uncheck();

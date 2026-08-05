@@ -20,11 +20,28 @@ function disposeGroup(group: THREE.Group): void {
   for (const object of [...group.children]) {
     group.remove(object);
     object.traverse((child) => {
-      if (!(child instanceof THREE.Mesh)) return;
-      child.geometry.dispose();
-      for (const material of Array.isArray(child.material) ? child.material : [child.material]) material.dispose();
+      if (child instanceof THREE.Mesh) {
+        child.geometry.dispose();
+        for (const material of Array.isArray(child.material) ? child.material : [child.material]) material.dispose();
+      } else if (child instanceof THREE.Sprite) {
+        child.material.map?.dispose();
+        child.material.dispose();
+      } else if (child instanceof THREE.LineSegments) {
+        child.geometry.dispose();
+        child.material.dispose();
+      }
     });
   }
+}
+
+function formatSeconds(value: number): string {
+  return String(Math.floor(value));
+}
+
+function roundedRectangle(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number): void {
+  context.beginPath();
+  context.roundRect(x, y, width, height, radius);
+  context.fill();
 }
 
 function stripGeometry(points: Point2[], width: number, sampler: TerrainSampler, exaggeration: number, offset: number): THREE.BufferGeometry {
@@ -249,10 +266,59 @@ export class TrafficRenderer {
         : agent.mode === 'bus'
           ? this.createBus()
           : this.createTram();
+      this.addAgentLabel(object, agent);
       object.name = `Simulated ${agent.id}`;
       this.agentObjects.set(agent.id, object);
       this.agentLayer.add(object);
     }
+  }
+
+  private addAgentLabel(group: THREE.Group, agent: TrafficAgent): void {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 112;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, depthTest: true, sizeAttenuation: false });
+    const sprite = new THREE.Sprite(material);
+    const height = agent.mode === 'car' ? 2.55 : agent.mode === 'bus' ? 4.25 : 4.75;
+    const width = agent.mode === 'tram' ? 0.105 : agent.mode === 'bus' ? 0.065 : 0.055;
+    sprite.position.set(0, height, 0);
+    sprite.scale.set(width, width * (canvas.height / canvas.width), 1);
+    sprite.center.set(0.5, 0);
+    sprite.renderOrder = 200;
+    sprite.userData.agentLabel = { canvas, context, texture, text: '' };
+    group.add(sprite);
+    this.updateAgentLabel(sprite, agent);
+  }
+
+  private updateAgentLabel(sprite: THREE.Sprite, agent: TrafficAgent): void {
+    const label = sprite.userData.agentLabel as {
+      canvas: HTMLCanvasElement;
+      context: CanvasRenderingContext2D;
+      texture: THREE.CanvasTexture;
+      text: string;
+    } | undefined;
+    if (!label) return;
+    const visible = formatSeconds(agent.visibleSeconds);
+    const text = agent.mode === 'tram'
+      ? `${visible} s · światła ${agent.signalWaitCount}× / ${formatSeconds(agent.signalWaitSeconds)} s · ~${agent.passengerCount} os.`
+      : `${visible} s · ~${agent.passengerCount} os.`;
+    if (label.text === text) return;
+    label.text = text;
+    const { canvas, context } = label;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = 'rgba(27, 35, 31, 0.88)';
+    roundedRectangle(context, 6, 6, canvas.width - 12, canvas.height - 12, 22);
+    context.fillStyle = agent.mode === 'tram' ? '#f0d74b' : agent.mode === 'bus' ? '#9dd89a' : '#f3f2e8';
+    context.font = '600 44px system-ui, sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText(text, canvas.width / 2, canvas.height / 2 + 1, canvas.width - 34);
+    label.texture.needsUpdate = true;
   }
 
   private createCar(agent: TrafficAgent): THREE.Group {
@@ -338,6 +404,7 @@ export class TrafficRenderer {
       const indicatorOn = Math.floor(this.simulation.elapsed * 2) % 2 === 0;
       object.traverse((child) => {
         if (child.userData.indicatorSide) child.visible = child.userData.indicatorSide === indicatorSide && indicatorOn;
+        if (child instanceof THREE.Sprite && child.userData.agentLabel) this.updateAgentLabel(child, agent);
       });
     }
     for (const materials of this.signalMaterials) {

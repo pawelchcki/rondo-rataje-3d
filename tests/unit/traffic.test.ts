@@ -33,6 +33,12 @@ describe('authored traffic topology', () => {
         const effectiveMode: TrafficMode = route.mode === 'car' ? 'car' : route.mode;
         expect(lane?.permittedModes).toContain(effectiveMode);
       }
+      if (route.mode === 'tram') {
+        expect(route.signalStops).toHaveLength(2);
+        expect(route.signalStops?.[0].signalGroup).toMatch(/-entry$/);
+        expect(route.signalStops?.[1].signalGroup).toMatch(/-ring$/);
+        expect(route.signalStops?.[1].distance).toBeGreaterThan(route.signalStops?.[0].distance ?? 0);
+      }
     }
   });
 
@@ -136,24 +142,26 @@ describe('seeded fixed-step microsimulation', () => {
 
   it('lets cars, buses, and trams cross only with signal permission and limits acceleration jerk', () => {
     const simulation = new TrafficSimulation();
-    const previousClearance = new Map(simulation.agents.map((agent) => [agent.id, agent.signalCleared]));
+    const previousCheckpoint = new Map(simulation.agents.map((agent) => [agent.id, agent.signalCheckpointIndex]));
     const previousAcceleration = new Map(simulation.agents.map((agent) => [agent.id, agent.acceleration]));
     const crossings = { car: 0, bus: 0, tram: 0 };
     for (let tick = 0; tick < 7_200; tick += 1) {
+      const checkpointGroups = new Map(simulation.agents.map((agent) => [agent.id, simulation.nextSignalStop(agent)?.signalGroup]));
       simulation.advance(1 / 30);
       for (const agent of simulation.agents) {
-        const wasCleared = previousClearance.get(agent.id) ?? agent.signalCleared;
-        if (!wasCleared && agent.signalCleared) {
-          expect(simulation.vehicleSignal(agent.route.signalGroup)).not.toBe('red');
+        const priorCheckpoint = previousCheckpoint.get(agent.id) ?? agent.signalCheckpointIndex;
+        if (agent.signalCheckpointIndex > priorCheckpoint) {
+          expect(simulation.vehicleSignal(checkpointGroups.get(agent.id) ?? agent.route.signalGroup)).not.toBe('red');
           crossings[agent.mode] += 1;
         }
-        if (!agent.signalCleared && agent.route.stopAt !== undefined) expect(agent.distance).toBeLessThan(agent.route.stopAt);
+        const nextStop = simulation.nextSignalStop(agent);
+        if (!agent.signalCleared && nextStop) expect(agent.distance).toBeLessThan(nextStop.distance);
         const priorAcceleration = previousAcceleration.get(agent.id) ?? agent.acceleration;
         if (agent.speed > 0.5 && agent.dwellRemaining === 0) {
           const jerkLimit = agent.mode === 'car' ? 4 : agent.mode === 'bus' ? 1.8 : 1.25;
           expect(Math.abs(agent.acceleration - priorAcceleration)).toBeLessThanOrEqual(jerkLimit / 30 + 0.000_001);
         }
-        previousClearance.set(agent.id, agent.signalCleared);
+        previousCheckpoint.set(agent.id, agent.signalCheckpointIndex);
         previousAcceleration.set(agent.id, agent.acceleration);
       }
     }
@@ -161,6 +169,39 @@ describe('seeded fixed-step microsimulation', () => {
     expect(crossings.bus).toBeGreaterThan(0);
     expect(crossings.tram).toBeGreaterThan(0);
     expect(simulation.redLightViolations).toBe(0);
+  }, 15_000);
+
+  it('assigns deterministic, mode-appropriate passenger estimates and visible-time counters', () => {
+    const a = new TrafficSimulation();
+    const b = new TrafficSimulation();
+    a.reset(2026);
+    b.reset(2026);
+    expect(a.agents.map((agent) => agent.passengerCount)).toEqual(b.agents.map((agent) => agent.passengerCount));
+    for (const agent of a.agents) {
+      const range = agent.mode === 'car' ? [1, 4] : agent.mode === 'bus' ? [12, 80] : [35, 180];
+      expect(agent.passengerCount).toBeGreaterThanOrEqual(range[0]);
+      expect(agent.passengerCount).toBeLessThanOrEqual(range[1]);
+    }
+    a.advance(0.2);
+    expect(a.agents.some((agent) => agent.visibleSeconds >= 0.19)).toBe(true);
+  });
+
+  it('makes the ordinary tram mode wait at two signals while absolute priority remains conflict-safe', () => {
+    const absolute = new TrafficSimulation();
+    const standard = new TrafficSimulation();
+    standard.setTramPriority('standard');
+    const maximumStops = { absolute: 0, standard: 0 };
+    for (let tick = 0; tick < 9_000; tick += 1) {
+      absolute.advance(1 / 30);
+      standard.advance(1 / 30);
+      maximumStops.absolute = Math.max(maximumStops.absolute, ...absolute.agents.filter((agent) => agent.mode === 'tram').map((agent) => agent.signalWaitCount));
+      maximumStops.standard = Math.max(maximumStops.standard, ...standard.agents.filter((agent) => agent.mode === 'tram').map((agent) => agent.signalWaitCount));
+    }
+    expect(maximumStops.absolute).toBeLessThanOrEqual(1);
+    expect(maximumStops.standard).toBe(2);
+    expect(absolute.tramSignalWaitingSeconds).toBeLessThan(standard.tramSignalWaitingSeconds * 0.25);
+    expect(absolute.redLightViolations).toBe(0);
+    expect(standard.redLightViolations).toBe(0);
   }, 15_000);
 
   it('contains no pedestrian agents or pedestrian demand', () => {
