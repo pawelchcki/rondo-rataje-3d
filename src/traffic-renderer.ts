@@ -84,6 +84,7 @@ export class TrafficRenderer {
   private readonly agentLayer = new THREE.Group();
   private readonly agentObjects = new Map<string, THREE.Group>();
   private readonly signalMaterials: SignalMaterials[] = [];
+  private readonly pedestrianOnlyMaterials: Array<{ group: string; red: THREE.MeshStandardMaterial; green: THREE.MeshStandardMaterial }> = [];
   private readonly transitMaterials: Array<{ group: string; red: THREE.MeshStandardMaterial; green: THREE.MeshStandardMaterial }> = [];
   private exaggeration = 1;
 
@@ -101,6 +102,7 @@ export class TrafficRenderer {
     disposeGroup(this.agentLayer);
     this.agentObjects.clear();
     this.signalMaterials.length = 0;
+    this.pedestrianOnlyMaterials.length = 0;
     this.transitMaterials.length = 0;
     this.createMarkings();
     this.createSignals();
@@ -139,6 +141,15 @@ export class TrafficRenderer {
       for (let distance = 1; distance < length; distance += 1.45) {
         const center = samplePolyline([start, end], distance).point;
         this.addRoadRectangle(center, heading, 0.72, 2.8, 0xe9e7d8, 0.41);
+      }
+    }
+    for (const crossing of TRAFFIC_NETWORK.pedestrianGroups.slice(8)) {
+      const start = crossing.points[0];
+      const end = crossing.points[1];
+      const length = Math.hypot(end[0] - start[0], end[1] - start[1]);
+      const heading = Math.atan2(end[1] - start[1], end[0] - start[0]);
+      for (let distance = 0.8; distance < length; distance += 1.45) {
+        this.addRoadRectangle(samplePolyline([start, end], distance).point, heading, 0.72, 2.4, 0xe9e7d8, 0.41);
       }
     }
     for (const signal of TRAFFIC_NETWORK.signals) {
@@ -235,6 +246,28 @@ export class TrafficRenderer {
       group.traverse((object) => { if (object instanceof THREE.Mesh) object.castShadow = true; });
       this.infrastructure.add(group);
       this.signalMaterials.push({ red, amber, green, pedestrianRed, pedestrianGreen, definition });
+    }
+    const groupsWithCombinedHead = new Set(TRAFFIC_NETWORK.signals.map((signal) => signal.pedestrianGroup));
+    for (const definition of TRAFFIC_NETWORK.pedestrianGroups.filter((group) => !groupsWithCombinedHead.has(group.id))) {
+      const position = definition.points[0];
+      const ground = this.sampler.relative(...position, this.exaggeration) + 0.4;
+      const group = new THREE.Group();
+      group.position.set(position[0], ground, -position[1]);
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06, 0.08, 2.7, 7),
+        new THREE.MeshStandardMaterial({ color: 0x45514c, roughness: 0.5, metalness: 0.5 }),
+      );
+      pole.position.y = 1.35;
+      group.add(pole, primitiveBox([0.42, 0.76, 0.34], 0x202724, [0, 2.3, 0]));
+      const red = new THREE.MeshStandardMaterial({ color: 0x302f2a, emissive: 0xff2d22, emissiveIntensity: 0.03 });
+      const green = new THREE.MeshStandardMaterial({ color: 0x302f2a, emissive: 0x36d66b, emissiveIntensity: 0.03 });
+      for (const [index, material] of [red, green].entries()) {
+        const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.12, 9, 6), material);
+        lamp.position.set(0, 2.47 - index * 0.34, -0.19);
+        group.add(lamp);
+      }
+      this.infrastructure.add(group);
+      this.pedestrianOnlyMaterials.push({ group: definition.id, red, green });
     }
     for (const [index, position] of ([[-11, -22], [17, 41]] as Point2[]).entries()) {
       const ground = this.sampler.relative(...position, this.exaggeration) + 0.42;
@@ -420,6 +453,11 @@ export class TrafficRenderer {
       const signal = this.simulation.vehicleSignal(materials.group);
       materials.red.emissiveIntensity = signal === 'red' ? 3.2 : 0.03;
       materials.green.emissiveIntensity = signal === 'green' ? 3.2 : 0.03;
+    }
+    for (const materials of this.pedestrianOnlyMaterials) {
+      const signal = this.simulation.pedestrianSignal(materials.group);
+      materials.red.emissiveIntensity = signal === 'stop' ? 3.2 : 0.03;
+      materials.green.emissiveIntensity = signal !== 'stop' ? 3.2 : 0.03;
     }
   }
 }

@@ -64,6 +64,24 @@ test('renders measured terrain and trees and responds to controls', async ({ pag
   expect(signalAfter).not.toBe(signalBefore);
   expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.trafficRedLightViolations)).toBe(0);
 
+  const hiddenPedestrians = await page.evaluate(() => {
+    const api = (window as RatajeWindow).__RONDO_RATAJE__;
+    api?.stepTraffic(90);
+    return {
+      profile: api?.demandProfile,
+      groups: api?.pedestrianQueues.length,
+      served: api?.servedPedestrians,
+      activeSignals: Object.keys(api?.trafficSignals ?? {}).length,
+      transitPassengers: api?.totalTransitPassengers,
+    };
+  });
+  expect(hiddenPedestrians).toMatchObject({ profile: 'typical', groups: 11 });
+  expect(hiddenPedestrians.served).toBeGreaterThan(0);
+  expect(hiddenPedestrians.activeSignals).toBe(31);
+  expect(hiddenPedestrians.transitPassengers).toBeGreaterThan(0);
+  await expect(page.locator('#pedestrian-served')).not.toHaveText('0');
+  await expect(page.locator('#transit-passengers')).not.toHaveText('0');
+
   await page.getByRole('button', { name: 'Zwykły 2×' }).click();
   const comparison = await page.evaluate(() => {
     const api = (window as RatajeWindow).__RONDO_RATAJE__;

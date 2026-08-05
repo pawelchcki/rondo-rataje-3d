@@ -31,16 +31,28 @@
         <fieldset class="traffic-controls">
           <legend>Symulacja</legend>
           <button type="button" data-action="traffic-toggle" aria-pressed="false">Wstrzymaj ruch</button>
+          <span class="control-caption">Profil popytu</span>
           <div class="density-buttons" aria-label="Natężenie ruchu">
-            <button type="button" data-density="low" aria-pressed="false">Małe</button>
-            <button type="button" data-density="medium" aria-pressed="true">Średnie</button>
-            <button type="button" data-density="high" aria-pressed="false">Duże</button>
+            <button type="button" data-density="low" aria-pressed="false" title="quiet · 35% popytu">Małe</button>
+            <button type="button" data-density="medium" aria-pressed="true" title="typical · 65% popytu">Średnie</button>
+            <button type="button" data-density="high" aria-pressed="false" title="peak-2023 · 100% popytu">Duże</button>
           </div>
           <span class="control-caption">Priorytet tramwajów</span>
           <div class="priority-buttons" aria-label="Priorytet tramwajów">
-            <button type="button" data-tram-priority="absolute" aria-pressed="true" title="Tramwaj przerywa bieżący cykl po bezpiecznym czasie minimalnym">Bezwzględny</button>
+            <button type="button" data-tram-priority="adaptive" aria-pressed="true" title="Najwcześniejsza bezpieczna podfaza z zachowaniem ruchu niekolizyjnego">Adaptacyjny</button>
+            <button type="button" data-tram-priority="absolute" aria-pressed="false" title="Najwcześniejsza obsługa po prawidłowym opróżnieniu konfliktów">Bezwzględny</button>
             <button type="button" data-tram-priority="standard" aria-pressed="false" title="Tramwaj czeka na dwa punkty kontroli sygnału">Zwykły 2×</button>
           </div>
+          <p class="model-note">Piesi są symulowani, lecz postacie pozostają ukryte.</p>
+          <dl class="simulation-metrics" aria-label="Metryki ruchu pieszego i pasażerów">
+            <div><dt>Oczekujący piesi</dt><dd id="pedestrian-waiting">0</dd></div>
+            <div><dt>Obsłużeni piesi</dt><dd id="pedestrian-served">0</dd></div>
+            <div><dt>Śr. / maks. oczekiwanie</dt><dd id="pedestrian-wait-time">0,0 / 0,0 s</dd></div>
+            <div><dt>Aktywna faza piesza</dt><dd id="pedestrian-phase">—</dd></div>
+            <div><dt>Pasażerowie PT</dt><dd id="transit-passengers">0</dd></div>
+            <div><dt>Wymiana pasażerów</dt><dd id="passenger-exchange">0 / 0</dd></div>
+            <div><dt>Ostatni postój</dt><dd id="transit-dwell">—</dd></div>
+          </dl>
         </fieldset>
         <label class="exaggeration"><input type="checkbox" data-action="exaggerate" /><span>Teren ×3</span></label>
       </section>

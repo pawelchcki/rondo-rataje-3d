@@ -22,7 +22,30 @@ try {
     const counts = map.api.activeAgentCounts;
     trafficCount.value = String(counts.cars + counts.buses + counts.trams);
   };
+  const updateSimulationMetrics = (): void => {
+    const groups = map.api.pedestrianQueues;
+    const waiting = groups.reduce((sum, group) => sum + group.queue, 0);
+    const served = groups.reduce((sum, group) => sum + group.served, 0);
+    const totalWait = groups.reduce((sum, group) => sum + group.totalWaitSeconds, 0);
+    const maximumWait = Math.max(0, ...groups.map((group) => Math.max(group.maximumWaitSeconds, group.currentMaximumWaitSeconds)));
+    const active = groups.filter((group) => group.signal !== 'stop').map((group) => `${group.id} ${group.signal === 'walk' ? 'idź' : 'zejście'}`);
+    const transit = map.api.trafficTelemetry.filter((agent) => agent.mode !== 'car');
+    const lastDwell = Math.max(0, ...transit.map((agent) => agent.dwellSeconds));
+    const setText = (id: string, text: string): void => {
+      const element = document.querySelector<HTMLElement>(`#${id}`);
+      if (element) element.textContent = text;
+    };
+    setText('pedestrian-waiting', String(waiting));
+    setText('pedestrian-served', String(served));
+    setText('pedestrian-wait-time', `${(served > 0 ? totalWait / served : 0).toFixed(1).replace('.', ',')} / ${maximumWait.toFixed(1).replace('.', ',')} s`);
+    setText('pedestrian-phase', active.join(', ') || '—');
+    setText('transit-passengers', String(map.api.totalTransitPassengers));
+    setText('passenger-exchange', `${map.api.passengerBoardings} / ${map.api.passengerAlightings}`);
+    setText('transit-dwell', lastDwell > 0 ? `${lastDwell.toFixed(1).replace('.', ',')} s` : '—');
+  };
   updateTrafficCount();
+  updateSimulationMetrics();
+  window.setInterval(updateSimulationMetrics, 250);
   status.textContent = `${manifest.trees.length} drzew · ${manifest.buildings.length} budynków · ${manifest.stations.length} przystanków · symulacja gotowa`;
   status.classList.add('is-ready');
 
@@ -52,12 +75,13 @@ try {
         candidate.setAttribute('aria-pressed', String(candidate === button));
       });
       updateTrafficCount();
+      updateSimulationMetrics();
     });
   });
   document.querySelectorAll<HTMLButtonElement>('[data-tram-priority]').forEach((button) => {
     button.addEventListener('click', () => {
       const mode = button.dataset.tramPriority;
-      if (mode !== 'absolute' && mode !== 'standard') return;
+      if (mode !== 'adaptive' && mode !== 'absolute' && mode !== 'standard') return;
       map.api.setTramPriorityMode(mode);
       document.querySelectorAll<HTMLButtonElement>('[data-tram-priority]').forEach((candidate) => {
         candidate.setAttribute('aria-pressed', String(candidate === button));

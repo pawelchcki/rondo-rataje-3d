@@ -33,6 +33,9 @@ export interface TrafficRoute {
   stopAt?: number;
   dwellAt?: number;
   signalStops?: Array<{ distance: number; signalGroup: string }>;
+  orderedStopLines?: Array<{ distance: number; signalGroup: string }>;
+  conflictZoneIds?: string[];
+  downstreamSectorIds?: string[];
 }
 
 export interface TrafficCrossing {
@@ -42,6 +45,14 @@ export interface TrafficCrossing {
   conflictsWith: string[];
   approach: ApproachId;
   carriageway: 'inbound' | 'outbound';
+}
+
+export interface PedestrianSignalGroup {
+  id: string;
+  points: [Point2, Point2];
+  conflictsWith: string[];
+  demandClass: 'main' | 'local';
+  source: 'estimated';
 }
 
 export interface TrafficStop {
@@ -60,6 +71,26 @@ export interface TrafficSignal {
   pedestrianGroup: string;
 }
 
+export interface TrafficDetector {
+  id: string;
+  group: string;
+  distance: number;
+  position: Point2;
+}
+
+export interface TrafficConflictZone {
+  id: string;
+  center: Point2;
+  radius: number;
+  groups: string[];
+}
+
+export interface TrafficDownstreamSector {
+  id: string;
+  capacityMetres: number;
+  routeIds: string[];
+}
+
 export interface TrafficNetwork {
   schema: 'rondo-rataje-authored-traffic';
   version: 1;
@@ -69,9 +100,16 @@ export interface TrafficNetwork {
   portals: TrafficPortal[];
   routes: TrafficRoute[];
   crossings: TrafficCrossing[];
+  pedestrianGroups: PedestrianSignalGroup[];
   stops: TrafficStop[];
   signals: TrafficSignal[];
+  detectors: TrafficDetector[];
+  conflictZones: TrafficConflictZone[];
+  downstreamSectors: TrafficDownstreamSector[];
+  trajectoryConflicts: Record<string, string[]>;
   movementConflicts: Record<string, string[]>;
+  signalIntergreens: Record<string, Record<string, number>>;
+  roundaboutLaneChanges: false;
   roadSurfaces: TrafficRoadSurface[];
 }
 
@@ -212,15 +250,36 @@ function buildNetwork(): TrafficNetwork {
     ...ROUNDABOUT.map((centerline, index) => ({ id: `roundabout-${index + 1}`, centerline, width: 12 })),
   ];
 
-  for (const crossing of CROSSING_PLAN) {
+  const pedestrianGroups: PedestrianSignalGroup[] = [];
+
+  for (const [index, crossing] of CROSSING_PLAN.entries()) {
+    const id = `ped-${String(index + 1).padStart(2, '0')}`;
+    const points = centeredSegment(crossing.center, crossing.along, crossing.length);
     crossings.push({
       id: `crossing-${crossing.approach}-${crossing.carriageway}`,
-      points: centeredSegment(crossing.center, crossing.along, crossing.length),
-      signalGroup: `ped-${crossing.approach}`,
-      conflictsWith: [`vehicle-${crossing.approach}`],
+      points,
+      signalGroup: id,
+      conflictsWith: [],
       approach: crossing.approach,
       carriageway: crossing.carriageway,
     });
+    pedestrianGroups.push({
+      id,
+      points,
+      conflictsWith: [],
+      demandClass: index === 0 || index === 1 || index === 4 || index === 5 ? 'main' : 'local',
+      source: 'estimated',
+    });
+  }
+
+  // Trzy dodatkowe grupy P/R z planu sygnalizacji obsługują dojścia do
+  // terminalu i peronów. Są agregatami sterownika; postacie nie są renderowane.
+  for (const [id, center, direction, length, demandClass] of [
+    ['ped-09', [46, 99], [-22, 9], 9, 'main'],
+    ['ped-10', [-35, 37], [-12, -20], 8, 'main'],
+    ['ped-11', [-27, -78], [-19, 8], 9, 'main'],
+  ] as Array<[string, Point2, Point2, number, 'main' | 'local']>) {
+    pedestrianGroups.push({ id, points: centeredSegment(center, direction, length), conflictsWith: [], demandClass, source: 'estimated' });
   }
 
   for (const approach of APPROACHES) {
@@ -259,7 +318,7 @@ function buildNetwork(): TrafficNetwork {
     const stopLine = stopPose.point;
     const heading = stopPose.heading;
     const vehicleGroup = `vehicle-${approach.id}`;
-    const pedestrianGroup = `ped-${approach.id}`;
+    const pedestrianGroup = crossings.find((crossing) => crossing.approach === approach.id && crossing.carriageway === 'inbound')?.signalGroup ?? 'ped-01';
     signals.push({ id: `signal-${approach.id}`, approach: approach.id, position: stopLine, heading, vehicleGroup, pedestrianGroup });
   }
 
@@ -291,7 +350,7 @@ function buildNetwork(): TrafficNetwork {
         points,
         laneIds: [`${source.id}-in-${inner ? 'inner' : 'outer'}`, `roundabout-${inner ? 'inner' : 'outer'}`, `${destination.id}-out-${inner ? 'inner' : 'outer'}`],
         turn,
-        signalGroup: `vehicle-${source.id}`,
+        signalGroup: `vehicle-${source.id}-${turn}`,
         approach: source.id,
         stopAt: Math.max(0, inboundCrossing ? nearestDistanceOnPolyline(inboundPoints, inboundCrossing.center) - 3.5 : polylineLength(inboundPoints) - 9),
       });
@@ -345,15 +404,77 @@ function buildNetwork(): TrafficNetwork {
     });
   }
 
-  const vehicleGroups = APPROACHES.map((item) => `vehicle-${item.id}`);
+  const vehicleGroups = APPROACHES.flatMap((item) => Object.keys(TURN_STEPS).map((turn) => `vehicle-${item.id}-${turn}`));
   const transitGroups = ['transit-1-entry', 'transit-1-ring', 'transit-2-entry', 'transit-2-ring'];
   const movementConflicts: Record<string, string[]> = {};
-  for (const approach of APPROACHES) {
-    const vehicle = `vehicle-${approach.id}`;
-    movementConflicts[vehicle] = [...vehicleGroups.filter((group) => group !== vehicle), `ped-${approach.id}`, ...transitGroups];
-    movementConflicts[`ped-${approach.id}`] = [vehicle];
+  for (const vehicle of vehicleGroups) {
+    const approach = APPROACHES.find((item) => vehicle.startsWith(`vehicle-${item.id}-`));
+    const pedestrianConflicts = crossings
+      .filter((crossing) => crossing.approach === approach?.id)
+      .map((crossing) => crossing.signalGroup);
+    if (approach?.id === 'north-east') pedestrianConflicts.push('ped-09');
+    if (approach?.id === 'north-west') pedestrianConflicts.push('ped-10');
+    if (approach?.id === 'south-west') pedestrianConflicts.push('ped-11');
+    movementConflicts[vehicle] = [...vehicleGroups.filter((group) => group !== vehicle), ...pedestrianConflicts, ...transitGroups];
   }
-  for (const transit of transitGroups) movementConflicts[transit] = [...vehicleGroups, ...transitGroups.filter((group) => group !== transit)];
+  for (const pedestrian of pedestrianGroups) {
+    pedestrian.conflictsWith = vehicleGroups.filter((vehicle) => movementConflicts[vehicle]?.includes(pedestrian.id));
+    movementConflicts[pedestrian.id] = [...pedestrian.conflictsWith, ...transitGroups];
+  }
+  for (const crossing of crossings) crossing.conflictsWith = [...(movementConflicts[crossing.signalGroup] ?? [])];
+  for (const transit of transitGroups) movementConflicts[transit] = [...vehicleGroups, ...pedestrianGroups.map((group) => group.id), ...transitGroups.filter((group) => group !== transit)];
+
+  const trajectoryConflicts: Record<string, string[]> = Object.fromEntries(vehicleGroups.map((group) => [group, []]));
+  const carRoutes = routes.filter((route) => route.mode === 'car');
+  for (let left = 0; left < carRoutes.length; left += 1) {
+    for (let right = left + 1; right < carRoutes.length; right += 1) {
+      const a = carRoutes[left];
+      const b = carRoutes[right];
+      const crosses = a.points.some((point) => distanceToPolyline(point, b.points) < 3.2)
+        || b.points.some((point) => distanceToPolyline(point, a.points) < 3.2);
+      if (!crosses) continue;
+      trajectoryConflicts[a.signalGroup].push(b.signalGroup);
+      trajectoryConflicts[b.signalGroup].push(a.signalGroup);
+    }
+  }
+
+  const conflictZones: TrafficConflictZone[] = ROUNDABOUT.map((segment, index) => ({
+    id: `ring-zone-${index + 1}`,
+    center: segment[Math.floor(segment.length / 2)],
+    radius: 10,
+    groups: [...vehicleGroups.filter((group) => {
+      const route = routes.find((candidate) => candidate.mode === 'car' && candidate.signalGroup === group);
+      return route?.points.some((point) => distanceToPolyline(point, segment) < 3.2) ?? false;
+    }), ...transitGroups],
+  }));
+  const downstreamSectors: TrafficDownstreamSector[] = APPROACHES.map((approach) => ({
+    id: `downstream-${approach.id}`,
+    capacityMetres: polylineLength(approach.outbound) - 6,
+    routeIds: routes.filter((route) => {
+      const endpoint = route.points.at(-1);
+      const portal = approach.outbound.at(-1);
+      return endpoint !== undefined && portal !== undefined && Math.hypot(endpoint[0] - portal[0], endpoint[1] - portal[1]) < 5;
+    }).map((route) => route.id),
+  }));
+  for (const route of routes) {
+    route.orderedStopLines = route.signalStops ?? (route.stopAt === undefined ? [] : [{ distance: route.stopAt, signalGroup: route.signalGroup }]);
+    route.conflictZoneIds = conflictZones.filter((zone) => zone.groups.includes(route.signalGroup) || route.mode === 'tram').map((zone) => zone.id);
+    route.downstreamSectorIds = downstreamSectors.filter((sector) => sector.routeIds.includes(route.id)).map((sector) => sector.id);
+  }
+  const detectors: TrafficDetector[] = carRoutes.map((route) => {
+    const distance = Math.max(0, (route.stopAt ?? 25) - 22);
+    return { id: `detector-${route.signalGroup}`, group: route.signalGroup, distance, position: samplePolyline(route.points, distance).point };
+  });
+  const allGroups = [...vehicleGroups, ...pedestrianGroups.map((group) => group.id), ...transitGroups];
+  const signalIntergreens: Record<string, Record<string, number>> = {};
+  for (const from of allGroups) {
+    signalIntergreens[from] = {};
+    for (const to of movementConflicts[from] ?? []) {
+      const isTransit = from.startsWith('transit-') || to.startsWith('transit-');
+      const isPedestrian = from.startsWith('ped-') || to.startsWith('ped-');
+      signalIntergreens[from][to] = isTransit ? 4.5 : isPedestrian ? 3.5 : 1.5;
+    }
+  }
 
   return {
     schema: 'rondo-rataje-authored-traffic',
@@ -364,15 +485,22 @@ function buildNetwork(): TrafficNetwork {
     portals,
     routes,
     crossings,
+    pedestrianGroups,
     stops: [
-      { id: 'tram-north', position: [43, 106], modes: ['tram'], dwellSeconds: [8, 14] },
-      { id: 'tram-south', position: [-31, -89], modes: ['tram'], dwellSeconds: [8, 14] },
-      { id: 'bus-north', position: [54.584, 115.976], modes: ['bus'], dwellSeconds: [8, 14] },
-      { id: 'bus-south', position: [-42.986, -94.174], modes: ['bus'], dwellSeconds: [8, 14] },
-      { id: 'bus-west', position: [-90.936, 54.996], modes: ['bus'], dwellSeconds: [8, 14] },
+      { id: 'tram-north', position: [43, 106], modes: ['tram'], dwellSeconds: [14.3, 28.4] },
+      { id: 'tram-south', position: [-31, -89], modes: ['tram'], dwellSeconds: [14.3, 28.4] },
+      { id: 'bus-north', position: [54.584, 115.976], modes: ['bus'], dwellSeconds: [14.3, 28.4] },
+      { id: 'bus-south', position: [-42.986, -94.174], modes: ['bus'], dwellSeconds: [14.3, 28.4] },
+      { id: 'bus-west', position: [-90.936, 54.996], modes: ['bus'], dwellSeconds: [14.3, 28.4] },
     ],
     signals,
+    detectors,
+    conflictZones,
+    downstreamSectors,
+    trajectoryConflicts,
     movementConflicts,
+    signalIntergreens,
+    roundaboutLaneChanges: false,
     roadSurfaces,
   };
 }

@@ -3,8 +3,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FEATURE_OFFSET_STEP, SURFACE_OFFSETS, createBuilding, createLandCover, createRail, createRibbon } from './geometry.ts';
 import { TerrainSampler, createTerrain } from './terrain.ts';
 import { TrafficRenderer } from './traffic-renderer.ts';
+import { TRAFFIC_NETWORK } from './traffic-network.ts';
 import { TrafficSimulation } from './traffic-simulation.ts';
-import type { AgentCounts, TrafficDensity, TramPriorityMode } from './traffic-simulation.ts';
+import { RATAJE_DEMAND_DATASET } from './traffic-simulation.ts';
+import type { AgentCounts, DemandProfile, PedestrianGroupState, TrafficDensity, TramPriorityMode } from './traffic-simulation.ts';
 import type { BuildingRecord, SceneManifest, TransitStopRecord, TransportFeature, TreeKind, TreeRecord } from './types.ts';
 
 type LayerName = 'terrain' | 'transport' | 'buildings' | 'stations' | 'trees' | 'traffic';
@@ -18,13 +20,25 @@ export interface SceneApi {
   readonly trafficPaused: boolean;
   readonly trafficVisible: boolean;
   readonly trafficDensity: TrafficDensity;
+  readonly demandProfile: DemandProfile;
+  readonly demandDataset: typeof RATAJE_DEMAND_DATASET;
   readonly activeAgentCounts: AgentCounts;
   readonly simulationTime: number;
   readonly activeSignalGroups: string[];
+  readonly trafficSignals: Record<string, 'red' | 'amber' | 'green' | 'stop' | 'walk' | 'clearance'>;
   readonly trafficSignalCrossings: number;
   readonly trafficRedLightViolations: number;
   readonly tramPriorityMode: TramPriorityMode;
   readonly tramSignalWaitingSeconds: number;
+  readonly pedestrianDemandEnabled: boolean;
+  readonly pedestrianQueues: PedestrianGroupState[];
+  readonly activePedestrianGroups: string[];
+  readonly servedPedestrians: number;
+  readonly totalTransitPassengers: number;
+  readonly passengerBoardings: number;
+  readonly passengerAlightings: number;
+  readonly vehicleDelaySeconds: number;
+  readonly pedestrianConflictDelaySeconds: number;
   readonly trafficTelemetry: Array<{
     id: string;
     mode: 'car' | 'bus' | 'tram';
@@ -32,6 +46,13 @@ export interface SceneApi {
     signalWaitSeconds: number;
     signalWaitCount: number;
     passengers: number;
+    passengerCapacity: number;
+    dwellSeconds: number;
+    dwellCount: number;
+    boarded: number;
+    alighted: number;
+    initialPassengers: number;
+    delaySeconds: number;
   }>;
   setLayer(name: LayerName, visible: boolean): void;
   setView(name: 'oblique' | 'top'): void;
@@ -39,6 +60,8 @@ export interface SceneApi {
   setTrafficPaused(paused: boolean): void;
   setTrafficVisible(visible: boolean): void;
   setTrafficDensity(density: TrafficDensity): void;
+  setDemandProfile(profile: DemandProfile): void;
+  setPedestrianDemand(enabled: boolean): void;
   setTramPriorityMode(mode: TramPriorityMode): void;
   resetTraffic(seed?: number): void;
   stepTraffic(seconds: number): void;
@@ -160,13 +183,32 @@ export class RatajeScene {
       get trafficPaused() { return map.trafficSimulation.paused; },
       get trafficVisible() { return map.trafficRenderer.group.visible; },
       get trafficDensity() { return map.trafficSimulation.density; },
+      get demandProfile() { return map.trafficSimulation.demandProfile; },
+      demandDataset: RATAJE_DEMAND_DATASET,
       get activeAgentCounts() { return map.trafficSimulation.counts; },
       get simulationTime() { return map.trafficSimulation.elapsed; },
       get activeSignalGroups() { return map.trafficSimulation.greenGroups(); },
+      get trafficSignals() {
+        return Object.fromEntries([
+          ...Object.keys(TRAFFIC_NETWORK.movementConflicts)
+            .filter((group) => group.startsWith('vehicle-') || group.startsWith('transit-'))
+            .map((group) => [group, map.trafficSimulation.vehicleSignal(group)] as const),
+          ...map.trafficSimulation.pedestrianTelemetry.map((group) => [group.id, group.signal] as const),
+        ]);
+      },
       get trafficSignalCrossings() { return map.trafficSimulation.signalCrossings; },
       get trafficRedLightViolations() { return map.trafficSimulation.redLightViolations; },
       get tramPriorityMode() { return map.trafficSimulation.tramPriority; },
       get tramSignalWaitingSeconds() { return map.trafficSimulation.tramSignalWaitingSeconds; },
+      get pedestrianDemandEnabled() { return map.trafficSimulation.pedestrianDemandEnabled; },
+      get pedestrianQueues() { return map.trafficSimulation.pedestrianTelemetry; },
+      get activePedestrianGroups() { return map.trafficSimulation.pedestrianTelemetry.filter((group) => group.signal !== 'stop').map((group) => group.id); },
+      get servedPedestrians() { return map.trafficSimulation.pedestrianTelemetry.reduce((sum, group) => sum + group.served, 0); },
+      get totalTransitPassengers() { return map.trafficSimulation.totalTransitPassengers; },
+      get passengerBoardings() { return map.trafficSimulation.passengerBoardings; },
+      get passengerAlightings() { return map.trafficSimulation.passengerAlightings; },
+      get vehicleDelaySeconds() { return map.trafficSimulation.vehicleDelaySeconds; },
+      get pedestrianConflictDelaySeconds() { return map.trafficSimulation.pedestrianConflictDelaySeconds; },
       get trafficTelemetry() {
         return map.trafficSimulation.agents.map((agent) => ({
           id: agent.id,
@@ -175,6 +217,13 @@ export class RatajeScene {
           signalWaitSeconds: agent.signalWaitSeconds,
           signalWaitCount: agent.signalWaitCount,
           passengers: agent.passengerCount,
+          passengerCapacity: agent.passengerCapacity,
+          dwellSeconds: agent.lastDwellSeconds,
+          dwellCount: agent.dwellCount,
+          boarded: agent.boardedPassengers,
+          alighted: agent.alightedPassengers,
+          initialPassengers: agent.initialPassengerCount,
+          delaySeconds: agent.delaySeconds,
         }));
       },
       setLayer: (name, visible) => this.setLayer(name, visible),
@@ -183,6 +232,8 @@ export class RatajeScene {
       setTrafficPaused: (paused) => this.trafficSimulation.setPaused(paused),
       setTrafficVisible: (visible) => this.setLayer('traffic', visible),
       setTrafficDensity: (density) => this.trafficSimulation.setDensity(density),
+      setDemandProfile: (profile) => this.trafficSimulation.setDemandProfile(profile),
+      setPedestrianDemand: (enabled) => this.trafficSimulation.setPedestrianDemand(enabled),
       setTramPriorityMode: (mode) => this.trafficSimulation.setTramPriority(mode),
       resetTraffic: (seed) => this.trafficSimulation.reset(seed),
       stepTraffic: (seconds) => {

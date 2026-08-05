@@ -8,7 +8,7 @@ Dołączony do repozytorium zestaw danych zawiera:
 - przycięte drogi, ciągi piesze i rowerowe, torowiska oraz pokrycie terenu z BDOT10k GUGiK;
 - 571 drzew odczytanych z publicznego modelu roślinności 3D GEOPOZ wraz z położeniem, identyfikatorem, gatunkiem, statusem, metodą pomiaru i wysokością;
 - 15 obrysów budynków BDOT10k oraz 11 oficjalnych punktów przystanków transportu zbiorowego;
-- autorską, deterministyczną symulację samochodów, autobusów i tramwajów z płynną interpolacją ruchu, kolejkami oraz bezpiecznymi fazami sygnalizacji;
+- autorską, deterministyczną symulację 16 grup kołowych, 11 ukrytych grup pieszych, autobusów i tramwajów z płynną interpolacją ruchu, kolejkami oraz bezpiecznymi fazami sygnalizacji;
 - etykiety nad każdym pojazdem pokazujące czas obecności na planszy i szacunkową liczbę pasażerów, a dla tramwajów także liczbę oraz łączny czas postojów na światłach.
 
 ## Uruchomienie lokalne
@@ -20,7 +20,11 @@ npm install
 npm run dev
 ```
 
-Otwórz adres podany przez Vite. Przeciągnięcie obraca kamerę, kółko myszy zmienia przybliżenie, a wskazanie drzewa, budynku, przystanku lub elementu sieci transportowej pokazuje dane źródłowe. Panel pozwala przełączać widok z góry i ukośny, włączać warstwy, sterować ruchem oraz opcjonalnie zwiększyć rzeźbę terenu do 3×. Przełącznik priorytetu tramwajowego porównuje bezwzględne, konfliktowo bezpieczne otwarcie obu punktów kontrolnych z trybem zwykłym, w którym tramwaj osobno uzyskuje zgodę przed rondem i na jego tarczy. Zmiana trybu uruchamia ten sam scenariusz od tego samego ziarna, dzięki czemu czasy można porównywać bez zmiany popytu. Domyślny widok zachowuje prawidłową skalę 1×.
+Otwórz adres podany przez Vite. Przeciągnięcie obraca kamerę, kółko myszy zmienia przybliżenie, a wskazanie drzewa, budynku, przystanku lub elementu sieci transportowej pokazuje dane źródłowe. Panel pozwala przełączać widok z góry i ukośny, włączać warstwy, sterować ruchem oraz opcjonalnie zwiększyć rzeźbę terenu do 3×. Przełącznik priorytetu tramwajowego porównuje tryb adaptacyjny, bezwzględne, konfliktowo bezpieczne otwarcie obu punktów kontrolnych oraz tryb zwykły, w którym tramwaj osobno uzyskuje zgodę przed rondem i na jego tarczy. Zmiana trybu uruchamia ten sam scenariusz od tego samego ziarna, dzięki czemu czasy można porównywać bez zmiany popytu. Domyślny widok zachowuje prawidłową skalę 1×.
+
+Piesi istnieją w modelu jako niewidoczne agregaty. Deterministyczne przyjścia tworzą kolejki i zgłoszenia przycisków, a aktywna faza `idź` oraz czas zejścia blokują konfliktowe grupy pojazdów. Panel pokazuje oczekujących i obsłużonych pieszych, ich czasy oczekiwania oraz aktywne przejścia. Brak postaci jest wyłącznie ustawieniem prezentacji — wyłączenie modeli 3D nie usuwa ruchu pieszego ze sterownika.
+
+Autobusy i tramwaje mają pojemność oraz zmienne napełnienie. Na przystanku deterministycznie wyznaczani są wysiadający i wsiadający, bilans jest ograniczany pojemnością pojazdu, a postój mieści się w przyjętym zakresie 14,3–28,4 s. Etykieta nad pojazdem pokazuje aktualną liczbę pasażerów.
 
 Polecenia produkcyjne i weryfikacyjne:
 
@@ -58,6 +62,8 @@ Położenia, wysokości terenu, szerokości dostępne w BDOT10k, obrysy i liczby
 
 Bryły budynków powstają z oficjalnych obrysów i liczby kondygnacji przy założeniu 3,2 m na kondygnację; nie są pomiarowymi modelami dachów. Położenia przystanków są oficjalne, natomiast wiaty, ławki, znaki i wyświetlacze są reprezentatywnymi modelami low-poly ustawionymi względem najbliższej drogi lub torowiska. Dwa rekordy dworca autobusowego definiują jeden model terminalu z sześcioma równoległymi, półprzezroczystymi dachami kolebkowymi, ciemnoniebieskimi ramami, zatokami, peronami i zadaszonym przejściem poprzecznym.
 
-Niewielkie przesunięcia wysokości warstw i funkcja `polygonOffset` zapobiegają migotaniu współpłaszczyznowych powierzchni bez zmiany danych źródłowych ani terenu. Geometria pasów, oznakowanie, sygnalizacja, program ruchu i liczby pasażerów są autorską nakładką symulacyjną opartą na rzucie BDOT10k. Liczby pasażerów są deterministycznymi szacunkami z zakresów 1–4 dla samochodu, 12–80 dla autobusu i 35–180 dla tramwaju; nie są pomiarem rzeczywistego napełnienia. Zakresy zweryfikowano względem pojemności poznańskiego taboru podawanych przez MPK: [80 miejsc w Solarisie Urbino 12 hydrogen](https://www.mpk.poznan.pl/tabor/solaris-urbino-12-hydrogen/) oraz [240 miejsc w Moderusie Gamma LF04](https://www.mpk.poznan.pl/tabor/moderus-gamma-lf04-ac-bd/). Model nie jest obrazem ruchu na żywo ani odwzorowaniem miejskiego sterownika sygnalizacji. BDOT10k jest źródłem topograficznym i pozostaje bardziej uogólniony niż dokumentacja inżynierii ruchu.
+Niewielkie przesunięcia wysokości warstw i funkcja `polygonOffset` zapobiegają migotaniu współpłaszczyznowych powierzchni bez zmiany danych źródłowych ani terenu. Geometria pasów, oznakowanie, sygnalizacja, program ruchu i liczby pasażerów są autorską nakładką symulacyjną opartą na rzucie BDOT10k. Liczby pasażerów są deterministycznymi szacunkami z zakresów 1–4 dla samochodu, 12–80 dla autobusu i 35–180 dla tramwaju; nie są pomiarem rzeczywistego napełnienia. Zakresy zweryfikowano względem pojemności poznańskiego taboru podawanych przez MPK: [80 miejsc w Solarisie Urbino 12 hydrogen](https://www.mpk.poznan.pl/tabor/solaris-urbino-12-hydrogen/) oraz [240 miejsc w Moderusie Gamma LF04](https://www.mpk.poznan.pl/tabor/moderus-gamma-lf04-ac-bd/). Popyt pieszy 180 osób/h przy terminalu i 90 osób/h na pozostałych przejściach jest jawną estymacją, skalowaną przez profile `quiet` (35%), `typical` (65%) i `peak-2023` (100%). Strumień ul. Krzywoustego 3256 pojazdów/2,5 h jest oznaczony jako pomiar, a pozostałe wloty i strumienie transportu publicznego jako estymacje wraz z metodą i datą w `RATAJE_DEMAND_DATASET`. Model nie jest obrazem ruchu na żywo ani odwzorowaniem miejskiego sterownika sygnalizacji. BDOT10k jest źródłem topograficznym i pozostaje bardziej uogólniony niż dokumentacja inżynierii ruchu.
+
+Stan diagnostyczny jest dostępny przez `window.__RONDO_RATAJE__`: obejmuje dataset popytu, kolejki i fazy piesze, bieżące napełnienia, wymianę pasażerów, postoje, sygnały, opóźnienia oraz deterministyczny reset z ziarnem.
 
 Atrybucja danych: Główny Urząd Geodezji i Kartografii (GUGiK); Zarząd Geodezji i Katastru Miejskiego GEOPOZ / Miasto Poznań.

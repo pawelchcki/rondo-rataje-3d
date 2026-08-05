@@ -96,6 +96,8 @@ h1 {
   background: rgb(239 238 231 / 82%);
   box-shadow: 0 18px 60px rgb(25 36 28 / 8%);
   backdrop-filter: blur(16px);
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
 }
 
 .view-buttons {
@@ -137,9 +139,44 @@ h1 {
 
 .priority-buttons {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   margin-top: 4px;
+}
+
+.model-note {
+  margin: 8px 1px 5px;
+  color: #697169;
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+.simulation-metrics {
+  display: grid;
+  gap: 2px;
+  margin: 5px 0 0;
+  padding-top: 5px;
+  border-top: 1px solid rgb(35 45 38 / 12%);
+  font-size: 8px;
+}
+
+.simulation-metrics div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.simulation-metrics dt { color: #697169; }
+
+.simulation-metrics dd {
+  max-width: 88px;
+  margin: 0;
+  overflow: hidden;
+  color: #303832;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .priority-buttons button {
