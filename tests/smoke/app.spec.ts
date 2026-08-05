@@ -1,4 +1,7 @@
 import { expect, test } from '@playwright/test';
+import type { SceneApi } from '../../src/scene.ts';
+
+type RatajeWindow = Window & { __RONDO_RATAJE__?: SceneApi };
 
 test('renders measured terrain and trees and responds to controls', async ({ page }) => {
   const errors: string[] = [];
@@ -9,7 +12,7 @@ test('renders measured terrain and trees and responds to controls', async ({ pag
 
   await page.goto('/');
   await page.locator('html[data-scene-ready="true"]').waitFor();
-  await expect(page.locator('#status')).toContainText('571 trees · 15 buildings · 11 stops');
+  await expect(page.locator('#status')).toContainText('571 drzew · 15 budynków · 11 przystanków');
   await expect(page.locator('#tree-count')).toHaveText('571');
   await expect(page.locator('#building-count')).toHaveText('15');
   await expect(page.locator('#station-count')).toHaveText('11');
@@ -27,16 +30,56 @@ test('renders measured terrain and trees and responds to controls', async ({ pag
   expect(state.stationShelters).toBe(11);
   expect(state.canvas).toBeGreaterThan(1_000);
 
-  await page.getByRole('button', { name: 'Top view' }).click();
-  await page.getByLabel(/Movement/).uncheck();
-  await page.getByLabel(/Buildings/).uncheck();
-  await page.getByLabel(/Stops/).uncheck();
-  await page.getByLabel(/Trees/).uncheck();
-  await page.getByLabel(/Buildings/).check();
-  await page.getByLabel(/Stops/).check();
-  await page.getByLabel(/Trees/).check();
-  await page.getByLabel(/Terrain ×3/).check();
-  await page.getByRole('button', { name: 'Oblique' }).click();
+  const traffic = await page.evaluate(() => {
+    const api = (window as RatajeWindow).__RONDO_RATAJE__;
+    return {
+      ready: api?.trafficReady,
+      counts: api?.activeAgentCounts,
+      density: api?.trafficDensity,
+      visible: api?.trafficVisible,
+      before: api?.simulationTime ?? 0,
+    };
+  });
+  expect(traffic).toMatchObject({
+    ready: true,
+    counts: { cars: 40, buses: 4, trams: 2 },
+    density: 'medium',
+    visible: true,
+  });
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.simulationTime ?? 0)).toBeGreaterThan(traffic.before);
+
+  await page.getByRole('button', { name: 'Wstrzymaj ruch' }).click();
+  const pausedAt = await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.simulationTime ?? 0);
+  await page.waitForTimeout(180);
+  expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.simulationTime ?? 0)).toBeCloseTo(pausedAt, 4);
+  await page.getByRole('button', { name: 'Wznów ruch' }).click();
+
+  const signalBefore = await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.activeSignalGroups.join(','));
+  const signalAfter = await page.evaluate(() => {
+    const api = (window as RatajeWindow).__RONDO_RATAJE__;
+    api?.stepTraffic(16);
+    return api?.activeSignalGroups.join(',');
+  });
+  expect(signalAfter).not.toBe(signalBefore);
+
+  await page.getByRole('button', { name: 'Duże' }).click();
+  expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.activeAgentCounts)).toEqual({ cars: 70, buses: 7, trams: 3 });
+  await page.getByRole('checkbox', { name: 'Ruch' }).uncheck();
+  expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.trafficVisible)).toBe(false);
+  await page.getByRole('checkbox', { name: 'Ruch' }).check();
+  expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.trafficVisible)).toBe(true);
+
+  await page.getByRole('button', { name: 'Widok z góry' }).click();
+  await page.getByLabel(/Drogi i trasy/).uncheck();
+  await page.getByLabel(/Budynki/).uncheck();
+  await page.getByLabel(/Przystanki/).uncheck();
+  await page.getByLabel(/Drzewa/).uncheck();
+  await page.getByLabel(/Budynki/).check();
+  await page.getByLabel(/Przystanki/).check();
+  await page.getByLabel(/Drzewa/).check();
+  await page.getByLabel(/Teren ×3/).check();
+  await page.getByRole('button', { name: 'Widok ukośny' }).click();
   await page.waitForTimeout(250);
   expect(errors).toEqual([]);
 });

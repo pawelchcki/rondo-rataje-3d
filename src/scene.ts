@@ -2,18 +2,33 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FEATURE_OFFSET_STEP, SURFACE_OFFSETS, createBuilding, createLandCover, createRail, createRibbon } from './geometry.ts';
 import { TerrainSampler, createTerrain } from './terrain.ts';
+import { TrafficRenderer } from './traffic-renderer.ts';
+import { TrafficSimulation } from './traffic-simulation.ts';
+import type { AgentCounts, TrafficDensity } from './traffic-simulation.ts';
 import type { BuildingRecord, SceneManifest, TransitStopRecord, TransportFeature, TreeKind, TreeRecord } from './types.ts';
 
-type LayerName = 'terrain' | 'transport' | 'buildings' | 'stations' | 'trees';
+type LayerName = 'terrain' | 'transport' | 'buildings' | 'stations' | 'trees' | 'traffic';
 
-interface SceneApi {
+export interface SceneApi {
   ready: boolean;
   terrainVertices: number;
   treeInstances: number;
   stationShelters: number;
+  trafficReady: boolean;
+  readonly trafficPaused: boolean;
+  readonly trafficVisible: boolean;
+  readonly trafficDensity: TrafficDensity;
+  readonly activeAgentCounts: AgentCounts;
+  readonly simulationTime: number;
+  readonly activeSignalGroups: string[];
   setLayer(name: LayerName, visible: boolean): void;
   setView(name: 'oblique' | 'top'): void;
   setExaggeration(value: 1 | 3): void;
+  setTrafficPaused(paused: boolean): void;
+  setTrafficVisible(visible: boolean): void;
+  setTrafficDensity(density: TrafficDensity): void;
+  resetTraffic(seed?: number): void;
+  stepTraffic(seconds: number): void;
 }
 
 declare global {
@@ -27,6 +42,21 @@ const TREE_COLORS: Record<TreeKind, number> = {
   conifer: 0x365c4a,
   unknown: 0x63765a,
 };
+
+const TREE_KIND_LABELS: Record<TreeKind, string> = {
+  broadleaf: 'drzewo liściaste',
+  conifer: 'drzewo iglaste',
+  unknown: 'nierozpoznany gatunek',
+};
+
+const TRANSPORT_LABELS: Record<TransportFeature['kind'], string> = {
+  road: 'droga',
+  path: 'ciąg pieszy',
+  cycleway: 'droga rowerowa',
+  tram: 'torowisko tramwajowe',
+};
+
+const METRES = new Intl.NumberFormat('pl-PL', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 function clearGroup(group: THREE.Group): void {
   for (const object of [...group.children]) {
@@ -61,12 +91,15 @@ export class RatajeScene {
   private readonly buildingLayer = new THREE.Group();
   private readonly stationLayer = new THREE.Group();
   private readonly treeLayer = new THREE.Group();
+  private readonly trafficSimulation = new TrafficSimulation();
+  private readonly trafficRenderer: TrafficRenderer;
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private readonly hoverTargets: THREE.Object3D[] = [];
   private readonly sampler: TerrainSampler;
   private elevationScale: 1 | 3 = 1;
   private animationFrame = 0;
+  private previousFrameTime = performance.now();
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -75,6 +108,7 @@ export class RatajeScene {
     heights: Float32Array,
   ) {
     this.sampler = new TerrainSampler(manifest.terrain, heights);
+    this.trafficRenderer = new TrafficRenderer(this.sampler, this.trafficSimulation);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -85,7 +119,7 @@ export class RatajeScene {
 
     this.scene.background = new THREE.Color(0xe7e5dc);
     this.scene.fog = new THREE.Fog(0xe7e5dc, 450, 920);
-    this.scene.add(this.terrainLayer, this.transportLayer, this.buildingLayer, this.stationLayer, this.treeLayer);
+    this.scene.add(this.terrainLayer, this.transportLayer, this.buildingLayer, this.stationLayer, this.treeLayer, this.trafficRenderer.group);
     this.addLighting();
 
     this.controls = new OrbitControls(this.camera, canvas);
@@ -103,14 +137,30 @@ export class RatajeScene {
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('pointerleave', this.hideDetails);
 
+    const map = this;
     this.api = {
       ready: true,
       terrainVertices: (this.terrainLayer.children[0] as THREE.Mesh).geometry.getAttribute('position').count,
       treeInstances: manifest.trees.length,
       stationShelters: manifest.stations.length,
+      trafficReady: true,
+      get trafficPaused() { return map.trafficSimulation.paused; },
+      get trafficVisible() { return map.trafficRenderer.group.visible; },
+      get trafficDensity() { return map.trafficSimulation.density; },
+      get activeAgentCounts() { return map.trafficSimulation.counts; },
+      get simulationTime() { return map.trafficSimulation.elapsed; },
+      get activeSignalGroups() { return map.trafficSimulation.greenGroups(); },
       setLayer: (name, visible) => this.setLayer(name, visible),
       setView: (name) => this.setView(name),
       setExaggeration: (value) => this.setExaggeration(value),
+      setTrafficPaused: (paused) => this.trafficSimulation.setPaused(paused),
+      setTrafficVisible: (visible) => this.setLayer('traffic', visible),
+      setTrafficDensity: (density) => this.trafficSimulation.setDensity(density),
+      resetTraffic: (seed) => this.trafficSimulation.reset(seed),
+      stepTraffic: (seconds) => {
+        for (let remaining = Math.max(0, seconds); remaining > 0; remaining -= 0.25) this.trafficSimulation.advance(Math.min(0.25, remaining));
+        this.trafficRenderer.sync();
+      },
     };
     window.__RONDO_RATAJE__ = this.api;
     document.documentElement.dataset.sceneReady = 'true';
@@ -189,6 +239,7 @@ export class RatajeScene {
     }
     this.createStations();
     this.createTrees();
+    this.trafficRenderer.rebuild(this.elevationScale);
   }
 
   private createStations(): void {
@@ -213,7 +264,7 @@ export class RatajeScene {
       const length = 5.2;
       const depth = 2.15;
       const group = new THREE.Group();
-      group.name = 'stop shelter';
+      group.name = 'wiata przystankowa';
       group.position.set(east, ground + SURFACE_OFFSETS.station + featureOrdinal * FEATURE_OFFSET_STEP, -north);
       group.rotation.y = this.nearestTransportAngle(east, north);
       group.userData.station = station;
@@ -292,7 +343,7 @@ export class RatajeScene {
       const terminalAngle = Math.atan2(last[1] - first[1], last[0] - first[0]);
       const ground = this.sampler.relative(east, north, this.elevationScale);
       const group = new THREE.Group();
-      group.name = 'Rataje bus terminal canopy field';
+      group.name = 'zadaszenia dworca autobusowego Rataje';
       group.position.set(east, ground + SURFACE_OFFSETS.station + busStations[0][0] * FEATURE_OFFSET_STEP, -north);
       group.rotation.y = terminalAngle;
       group.userData.station = terminalRecord;
@@ -473,15 +524,16 @@ export class RatajeScene {
       buildings: this.buildingLayer,
       stations: this.stationLayer,
       trees: this.treeLayer,
+      traffic: this.trafficRenderer.group,
     })[name].visible = visible;
   }
 
   setExaggeration(value: 1 | 3): void {
     if (this.elevationScale === value) return;
     this.elevationScale = value;
-    const visibility = [this.terrainLayer.visible, this.transportLayer.visible, this.buildingLayer.visible, this.stationLayer.visible, this.treeLayer.visible];
+    const visibility = [this.terrainLayer.visible, this.transportLayer.visible, this.buildingLayer.visible, this.stationLayer.visible, this.treeLayer.visible, this.trafficRenderer.group.visible];
     this.rebuildLayers();
-    [this.terrainLayer.visible, this.transportLayer.visible, this.buildingLayer.visible, this.stationLayer.visible, this.treeLayer.visible] = visibility;
+    [this.terrainLayer.visible, this.transportLayer.visible, this.buildingLayer.visible, this.stationLayer.visible, this.treeLayer.visible, this.trafficRenderer.group.visible] = visibility;
   }
 
   setView(name: 'oblique' | 'top'): void {
@@ -510,18 +562,18 @@ export class RatajeScene {
     const trees = hit.object.userData.trees as TreeRecord[] | undefined;
     if (trees && hit.instanceId !== undefined) {
       const tree = trees[hit.instanceId];
-      const species = tree.species ?? 'Unidentified tree';
-      this.details.innerHTML = `<strong>${species}</strong><em>${tree.speciesLatin ?? tree.kind}</em><dl><div><dt>Height</dt><dd>${tree.height.toFixed(1)} m</dd></div><div><dt>Status</dt><dd>${tree.status ?? '—'}</dd></div><div><dt>Survey</dt><dd>${tree.survey ?? '—'}</dd></div></dl>`;
+      const species = tree.species ?? 'Nierozpoznane drzewo';
+      this.details.innerHTML = `<strong>${species}</strong><em>${tree.speciesLatin ?? TREE_KIND_LABELS[tree.kind]}</em><dl><div><dt>Wysokość</dt><dd>${METRES.format(tree.height)} m</dd></div><div><dt>Status</dt><dd>${tree.status ?? '—'}</dd></div><div><dt>Pomiar</dt><dd>${tree.survey ?? '—'}</dd></div></dl>`;
     } else if (hit.object.userData.building) {
       const building = hit.object.userData.building as BuildingRecord;
-      this.details.innerHTML = `<strong>${building.name ?? building.function ?? 'Building'}</strong><em>${building.sourceLayer}</em><dl><div><dt>Function</dt><dd>${building.function ?? '—'}</dd></div><div><dt>Storeys</dt><dd>${building.levels ?? '—'}</dd></div><div><dt>Model height</dt><dd>${building.height.toFixed(1)} m</dd></div></dl>`;
+      this.details.innerHTML = `<strong>${building.name ?? building.function ?? 'Budynek'}</strong><em>${building.sourceLayer}</em><dl><div><dt>Funkcja</dt><dd>${building.function ?? '—'}</dd></div><div><dt>Kondygnacje</dt><dd>${building.levels ?? '—'}</dd></div><div><dt>Wysokość modelu</dt><dd>${METRES.format(building.height)} m</dd></div></dl>`;
     } else if (hit.object.userData.station) {
       const station = hit.object.userData.station as TransitStopRecord;
-      this.details.innerHTML = `<strong>${station.name}</strong><em>${station.sourceLayer}</em><dl><div><dt>Class</dt><dd>Transit stop</dd></div><div><dt>Status</dt><dd>${station.status ?? '—'}</dd></div><div><dt>Note</dt><dd>${station.note ?? '—'}</dd></div></dl>`;
+      this.details.innerHTML = `<strong>${station.name}</strong><em>${station.sourceLayer}</em><dl><div><dt>Klasa</dt><dd>Przystanek transportu zbiorowego</dd></div><div><dt>Status</dt><dd>${station.status ?? '—'}</dd></div><div><dt>Uwagi</dt><dd>${station.note ?? '—'}</dd></div></dl>`;
     } else {
       const feature = hit.object.userData.feature as TransportFeature | undefined;
       if (!feature) return;
-      this.details.innerHTML = `<strong>${feature.name ?? feature.kind}</strong><em>${feature.sourceLayer}</em><dl><div><dt>Class</dt><dd>${feature.kind}</dd></div><div><dt>Width</dt><dd>${feature.width.toFixed(1)} m</dd></div></dl>`;
+      this.details.innerHTML = `<strong>${feature.name ?? TRANSPORT_LABELS[feature.kind]}</strong><em>${feature.sourceLayer}</em><dl><div><dt>Klasa</dt><dd>${TRANSPORT_LABELS[feature.kind]}</dd></div><div><dt>Szerokość</dt><dd>${METRES.format(feature.width)} m</dd></div></dl>`;
     }
     this.details.hidden = false;
     this.details.style.left = `${Math.min(event.clientX + 18, window.innerWidth - 260)}px`;
@@ -535,6 +587,10 @@ export class RatajeScene {
   }
 
   private readonly render = (): void => {
+    const frameTime = performance.now();
+    this.trafficSimulation.advance(Math.min(0.1, (frameTime - this.previousFrameTime) / 1000));
+    this.previousFrameTime = frameTime;
+    this.trafficRenderer.sync();
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = requestAnimationFrame(this.render);

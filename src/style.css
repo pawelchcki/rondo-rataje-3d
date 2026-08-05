@@ -105,6 +105,31 @@ h1 {
   margin-bottom: 14px;
 }
 
+.traffic-controls {
+  margin-top: 10px;
+  border-top: 1px solid rgb(35 45 38 / 14%);
+  padding-top: 9px;
+}
+
+.traffic-controls > button { width: 100%; }
+
+.density-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.density-buttons button {
+  min-height: 28px;
+  font-size: 9px;
+}
+
+button[aria-pressed="true"] {
+  color: #eef0e9;
+  background: #496251;
+}
+
 button {
   min-height: 35px;
   border: 1px solid rgb(35 45 38 / 25%);

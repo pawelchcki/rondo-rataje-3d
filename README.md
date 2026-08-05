@@ -1,26 +1,27 @@
 # Rondo Rataje · 200 m
 
-A self-contained static Three.js map of the 200 m radius around Rondo Rataje in Poznań. The scene is centered at WGS84 `16.950278, 52.395556` / EPSG:2180 `360578.516, 505268.464` and uses real metres at the accurate default 1× vertical scale.
+Samodzielna, statyczna mapa Three.js obejmująca obszar w promieniu 200 m wokół ronda Rataje w Poznaniu. Środek sceny ma współrzędne WGS84 `16.950278, 52.395556` / EPSG:2180 `360578.516, 505268.464`. Model używa metrów i domyślnie zachowuje prawidłową skalę pionową 1×.
 
-The checked-in compact dataset contains:
+Dołączony do repozytorium zestaw danych zawiera:
 
-- a 401 × 401, 1 m terrain crop in PL-EVRF2007-NH from GUGiK NMT;
-- clipped roads, pedestrian/cycle routes, tram tracks and land cover from GUGiK BDOT10k;
-- 571 trees decoded from the GEOPOZ public 3D vegetation tileset, with source positions, IDs, species, status, survey method and measured height;
-- 15 BDOT10k building footprints extruded from published storey counts and 11 official BDOT10k public-transport stop points.
+- wycinek terenu 401 × 401 komórek o rozdzielczości 1 m, w układzie wysokościowym PL-EVRF2007-NH, pochodzący z NMT GUGiK;
+- przycięte drogi, ciągi piesze i rowerowe, torowiska oraz pokrycie terenu z BDOT10k GUGiK;
+- 571 drzew odczytanych z publicznego modelu roślinności 3D GEOPOZ wraz z położeniem, identyfikatorem, gatunkiem, statusem, metodą pomiaru i wysokością;
+- 15 obrysów budynków BDOT10k oraz 11 oficjalnych punktów przystanków transportu zbiorowego;
+- autorską, deterministyczną symulację samochodów, autobusów i tramwajów.
 
-## Run it
+## Uruchomienie lokalne
 
-Requires Node.js 20 or newer.
+Wymagany jest Node.js 20 lub nowszy.
 
 ```sh
 npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite. Drag to orbit, scroll to zoom, and hover over trees or movement features for source details. The controls switch between north-up top and oblique views, toggle layers, and optionally exaggerate terrain relief to 3×. The default is accurate 1× geometry.
+Otwórz adres podany przez Vite. Przeciągnięcie obraca kamerę, kółko myszy zmienia przybliżenie, a wskazanie drzewa, budynku, przystanku lub elementu sieci transportowej pokazuje dane źródłowe. Panel pozwala przełączać widok z góry i ukośny, włączać warstwy, sterować ruchem oraz opcjonalnie zwiększyć rzeźbę terenu do 3×. Domyślny widok zachowuje prawidłową skalę 1×.
 
-Production and verification commands:
+Polecenia produkcyjne i weryfikacyjne:
 
 ```sh
 npm run typecheck
@@ -29,25 +30,33 @@ npm run build
 npm run test:smoke
 ```
 
-The smoke test requires Playwright Chromium (`npx playwright install chromium` once on a new machine).
+Test przeglądarkowy wymaga Chromium dla Playwrighta. Na nowym komputerze należy jednorazowo wykonać `npx playwright install chromium`.
 
-## Refresh measured data
+## Publikacja w GitHub Pages
+
+Workflow `.github/workflows/deploy-pages.yml` buduje aplikację i publikuje katalog `dist` po każdej zmianie wysłanej do gałęzi `main`. Można go również uruchomić ręcznie w karcie **Actions**. Konfiguracja Vite używa względnej ścieżki bazowej, dlatego aplikacja działa zarówno w domenie użytkownika, jak i pod ścieżką repozytorium projektu.
+
+## Odświeżenie danych pomiarowych
 
 ```sh
 npm run data:refresh
 ```
 
-The refresh needs internet access and the `unzip` command. It:
+Odświeżenie wymaga dostępu do internetu oraz polecenia `unzip`. Skrypt:
 
-1. queries the GUGiK EVRF2007 WFS years newest-first and accepts the newest single year whose 1 m grids fill every output sample;
-2. discovers the current Poznań BDOT10k Shapefile package via its official WMS, extracts only the relevant transport, land-cover, building and stop layer families in temporary storage, then clips and converts them to local metres;
-3. traverses the live GEOPOZ vegetation tileset, fetches only tiles whose geographic bounds intersect the circle, recursively decodes CMPT/I3DM instances, transforms quantized ECEF positions, and filters the result to 200 m;
-4. writes only `public/data/scene.json` and `public/data/terrain.f32`.
+1. sprawdza od najnowszych roczniki usługi WFS GUGiK EVRF2007 i wybiera najnowszy pojedynczy rocznik, którego siatki 1 m wypełniają wszystkie próbki wyniku;
+2. odnajduje aktualny poznański pakiet Shapefile BDOT10k przez oficjalną usługę WMS, rozpakowuje w katalogu tymczasowym wyłącznie potrzebne warstwy transportu, pokrycia terenu, budynków i przystanków, po czym przycina je i przelicza na lokalne metry;
+3. przechodzi przez publiczny zestaw kafli roślinności GEOPOZ, pobiera kafle przecinające obszar sceny, rekursywnie odczytuje instancje CMPT/I3DM, przelicza skwantowane pozycje ECEF i ogranicza wynik do promienia 200 m;
+4. zapisuje wyłącznie `public/data/scene.json` oraz `public/data/terrain.f32`.
 
-Source archives remain in the operating system’s temporary directory and are deleted at the end. The manifest records URLs, retrieval day, source vintages, coordinate and height reference systems, SHA-256 checksums, center, radius, and attribution. Service indexes can change; consequently a later refresh may resolve a newer vintage than the checked-in data.
+Archiwa źródłowe pozostają w katalogu tymczasowym systemu operacyjnego i są usuwane po zakończeniu. Manifest zapisuje adresy źródeł, datę pobrania, roczniki, układy współrzędnych i wysokości, sumy SHA-256, środek, promień i atrybucję. Indeksy usług mogą się zmieniać, dlatego późniejsze odświeżenie może wskazać nowszy rocznik niż dane obecnie zapisane w repozytorium.
 
-## Accuracy and appearance
+## Dokładność i wygląd
 
-Positions, elevations, widths where populated by BDOT10k, building footprints and storey counts, stop locations, and tree heights come from the cited public datasets. Rendering is deliberately stylized: low-poly crowns, trunk proportions, colors, lighting, tram-bed appearance, and default widths used when an optional BDOT10k width is absent are cartographic choices. Building massing uses the official footprint and storey count with a documented 3.2 m per-storey display assumption; it is not a surveyed roof model. Stop positions are official, while their photo-referenced glass shelters, benches, signs, and passenger-information displays are representative low-poly models oriented to the nearest mapped road or tram alignment. The two bus-station records define one terminal-scale model with six parallel translucent barrel-vault platform roofs, dark-blue portal frames, bus lanes, concrete platforms, and a covered cross-aisle matching the documented Rataje station layout. Draped surfaces use small, documented layer and per-feature height offsets plus GPU polygon offset to prevent coplanar depth flicker; source coordinates and the underlying measured terrain are unchanged. There is no orthophoto or invented lane marking. BDOT10k is authoritative at its published topographic level but remains generalized rather than survey-grade street engineering geometry.
+Położenia, wysokości terenu, szerokości dostępne w BDOT10k, obrysy i liczby kondygnacji budynków, położenia przystanków oraz wysokości drzew pochodzą z wymienionych publicznych zbiorów. Renderowanie jest celowo stylizowane: korony low-poly, proporcje pni, kolory, oświetlenie, wygląd torowiska i wartości zastępcze dla brakujących szerokości są decyzjami kartograficznymi.
 
-Data attribution: Główny Urząd Geodezji i Kartografii (GUGiK); Zarząd Geodezji i Katastru Miejskiego GEOPOZ / Miasto Poznań.
+Bryły budynków powstają z oficjalnych obrysów i liczby kondygnacji przy założeniu 3,2 m na kondygnację; nie są pomiarowymi modelami dachów. Położenia przystanków są oficjalne, natomiast wiaty, ławki, znaki i wyświetlacze są reprezentatywnymi modelami low-poly ustawionymi względem najbliższej drogi lub torowiska. Dwa rekordy dworca autobusowego definiują jeden model terminalu z sześcioma równoległymi, półprzezroczystymi dachami kolebkowymi, ciemnoniebieskimi ramami, zatokami, peronami i zadaszonym przejściem poprzecznym.
+
+Niewielkie przesunięcia wysokości warstw i funkcja `polygonOffset` zapobiegają migotaniu współpłaszczyznowych powierzchni bez zmiany danych źródłowych ani terenu. Geometria pasów, oznakowanie, sygnalizacja i program ruchu są autorską nakładką symulacyjną opartą na rzucie BDOT10k. Nie są danymi pomiarowymi, obrazem ruchu na żywo ani odwzorowaniem miejskiego sterownika sygnalizacji. BDOT10k jest źródłem topograficznym i pozostaje bardziej uogólniony niż dokumentacja inżynierii ruchu.
+
+Atrybucja danych: Główny Urząd Geodezji i Kartografii (GUGiK); Zarząd Geodezji i Katastru Miejskiego GEOPOZ / Miasto Poznań.
