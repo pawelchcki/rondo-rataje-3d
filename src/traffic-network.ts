@@ -32,10 +32,40 @@ export interface TrafficRoute {
   approach?: ApproachId;
   stopAt?: number;
   dwellAt?: number;
-  signalStops?: Array<{ distance: number; signalGroup: string }>;
-  orderedStopLines?: Array<{ distance: number; signalGroup: string }>;
+  signalStops?: TrafficSignalStop[];
+  orderedStopLines?: TrafficSignalStop[];
   conflictZoneIds?: string[];
   downstreamSectorIds?: string[];
+  trackSections?: TrafficTrackSection[];
+  tramConflictEntry?: number;
+  tramConflictExit?: number;
+}
+
+export type TrafficSignalStopKind = 'entry' | 'ring' | 'transit';
+
+export interface TrafficSignalStop {
+  distance: number;
+  signalGroup: string;
+  type: TrafficSignalStopKind;
+  conflictZoneId: string;
+}
+
+export interface TrafficTrackSection {
+  trackId: string;
+  startDistance: number;
+  endDistance: number;
+  trackStartDistance: number;
+  conflictZoneId?: string;
+}
+
+export interface TramTrack {
+  id: string;
+  corridorId: string;
+  direction: 'forward' | 'reverse';
+  points: Point2[];
+  gauge: 1.435;
+  centerOffset: 1.55;
+  source: 'BDOT10k OT_SKTR_L';
 }
 
 export interface TrafficCrossing {
@@ -67,8 +97,11 @@ export interface TrafficSignal {
   approach: ApproachId;
   position: Point2;
   heading: number;
+  kind: 'entry' | 'ring';
   vehicleGroup: string;
-  pedestrianGroup: string;
+  vehicleGroups: [string, string];
+  pedestrianGroup?: string;
+  sourcePosition: 'mapped-from-msr-plan' | 'locally-fitted-to-scene';
 }
 
 export interface TrafficDetector {
@@ -111,6 +144,12 @@ export interface TrafficNetwork {
   signalIntergreens: Record<string, Record<string, number>>;
   roundaboutLaneChanges: false;
   roadSurfaces: TrafficRoadSurface[];
+  tramTracks: TramTrack[];
+  provenance: {
+    trafficSignalPlan: { title: string; url: string; figure: string };
+    mappedPositions: string[];
+    locallyFittedPositions: string[];
+  };
 }
 
 export interface TrafficRoadSurface {
@@ -165,6 +204,44 @@ const TURN_STEPS: Record<Extract<TurnKind, 'right' | 'straight' | 'left' | 'u-tu
   'u-turn': 3,
 };
 
+const SIGNAL_APPROACH_ORDER: ApproachId[] = ['north-east', 'south-east', 'south-west', 'north-west'];
+
+function signalGroups(approach: ApproachId): { entry: [string, string]; ring: [string, string] } {
+  const first = SIGNAL_APPROACH_ORDER.indexOf(approach) * 4 + 1;
+  const id = (offset: number): string => `K${String(first + offset).padStart(2, '0')}`;
+  return { entry: [id(0), id(1)], ring: [id(2), id(3)] };
+}
+
+const TRAM_CORRIDOR_CENTERLINES: Array<{ id: string; points: Point2[]; conflictZone?: string }> = [
+  {
+    id: 'west-arm',
+    points: [[-169.994, 100.343], [-141.866, 87.856], [-105.046, 69.886], [-82.706, 58.216], [-55.336, 43.376], [-41.616, 35.946], [-31.216, 30.306]],
+  },
+  {
+    id: 'north-arm',
+    points: [[20.684, 46.076], [26.644, 61.296], [33.544, 78.936], [51.694, 125.296], [74.104, 182.963]],
+  },
+  {
+    id: 'south-arm',
+    points: [[-4.196, -16.364], [-13.806, -41.574], [-41.626, -112.624], [-70.666, -184.318]],
+  },
+  {
+    id: 'west-south-curve',
+    points: [[-31.216, 30.306], [-30.296, 29.746], [-20.776, 23.896], [-15.726, 18.856], [-10.466, 12.276], [-7.026, 5.696], [-4.976, -0.664], [-4.096, -8.354], [-4.196, -16.364]],
+    conflictZone: 'tram-intersection',
+  },
+  {
+    id: 'north-south-curve',
+    points: [[20.684, 46.076], [7.904, 13.416], [-4.196, -16.364]],
+    conflictZone: 'tram-intersection',
+  },
+  {
+    id: 'west-north-curve',
+    points: [[-31.216, 30.306], [-21.446, 27.496], [-14.676, 26.236], [-8.406, 26.206], [-0.626, 27.466], [5.714, 29.586], [11.244, 32.756], [15.264, 38.426], [20.684, 46.076]],
+    conflictZone: 'tram-intersection',
+  },
+];
+
 const CROSSING_PLAN: Array<{
   approach: ApproachId;
   carriageway: 'inbound' | 'outbound';
@@ -198,6 +275,95 @@ function offsetPolyline(points: Point2[], offset: number): Point2[] {
     const length = Math.hypot(dx, dy) || 1;
     return [point[0] - (dy / length) * offset, point[1] + (dx / length) * offset];
   });
+}
+
+function interpolatePoint(a: Point2, b: Point2, ta: number, tb: number, t: number): Point2 {
+  const span = Math.max(1e-6, tb - ta);
+  const weight = (t - ta) / span;
+  return [a[0] + (b[0] - a[0]) * weight, a[1] + (b[1] - a[1]) * weight];
+}
+
+function centripetalSpan(p0: Point2, p1: Point2, p2: Point2, p3: Point2, progress: number): Point2 {
+  const nextT = (previous: number, a: Point2, b: Point2): number => previous + Math.sqrt(Math.max(1e-6, Math.hypot(b[0] - a[0], b[1] - a[1])));
+  const t0 = 0;
+  const t1 = nextT(t0, p0, p1);
+  const t2 = nextT(t1, p1, p2);
+  const t3 = nextT(t2, p2, p3);
+  const t = t1 + (t2 - t1) * progress;
+  const a1 = interpolatePoint(p0, p1, t0, t1, t);
+  const a2 = interpolatePoint(p1, p2, t1, t2, t);
+  const a3 = interpolatePoint(p2, p3, t2, t3, t);
+  const b1 = interpolatePoint(a1, a2, t0, t2, t);
+  const b2 = interpolatePoint(a2, a3, t1, t3, t);
+  return interpolatePoint(b1, b2, t1, t2, t);
+}
+
+/** Centripetal Catmull–Rom sampling shared by rails, routes and vehicle poses. */
+export function sampleCentripetalPolyline(controlPoints: Point2[], maximumStep = 0.5): Point2[] {
+  if (controlPoints.length < 2) return [...controlPoints];
+  const points: Point2[] = [controlPoints[0]];
+  for (let index = 0; index < controlPoints.length - 1; index += 1) {
+    const p1 = controlPoints[index];
+    const p2 = controlPoints[index + 1];
+    const p0: Point2 = index === 0
+      ? [p1[0] * 2 - p2[0], p1[1] * 2 - p2[1]]
+      : controlPoints[index - 1];
+    const p3: Point2 = index + 2 >= controlPoints.length
+      ? [p2[0] * 2 - p1[0], p2[1] * 2 - p1[1]]
+      : controlPoints[index + 2];
+    const localEstimate = Math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+      + 0.12 * (Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) + Math.hypot(p3[0] - p2[0], p3[1] - p2[1]));
+    const steps = Math.max(1, Math.ceil(localEstimate / Math.max(0.1, maximumStep * 0.72)));
+    for (let step = 1; step <= steps; step += 1) points.push(centripetalSpan(p0, p1, p2, p3, step / steps));
+  }
+  return points.filter((point, index) => index === 0 || Math.hypot(point[0] - points[index - 1][0], point[1] - points[index - 1][1]) > 1e-5);
+}
+
+function densifyLinear(points: Point2[], maximumStep = 0.45): Point2[] {
+  const result: Point2[] = [points[0]];
+  for (let index = 1; index < points.length; index += 1) {
+    const before = points[index - 1];
+    const after = points[index];
+    const length = Math.hypot(after[0] - before[0], after[1] - before[1]);
+    const steps = Math.max(1, Math.ceil(length / maximumStep));
+    for (let step = 1; step <= steps; step += 1) {
+      const progress = step / steps;
+      result.push([before[0] + (after[0] - before[0]) * progress, before[1] + (after[1] - before[1]) * progress]);
+    }
+  }
+  return result;
+}
+
+function buildTramTracks(): TramTrack[] {
+  const tracks: TramTrack[] = TRAM_CORRIDOR_CENTERLINES.flatMap((corridor): TramTrack[] => {
+    const smoothCenterline = sampleCentripetalPolyline(corridor.points);
+    const forward = offsetPolyline(smoothCenterline, -1.55);
+    const reverse = [...offsetPolyline(smoothCenterline, 1.55)].reverse();
+    return [
+      { id: `track-${corridor.id}-forward`, corridorId: corridor.id, direction: 'forward', points: forward, gauge: 1.435, centerOffset: 1.55, source: 'BDOT10k OT_SKTR_L' },
+      { id: `track-${corridor.id}-reverse`, corridorId: corridor.id, direction: 'reverse', points: reverse, gauge: 1.435, centerOffset: 1.55, source: 'BDOT10k OT_SKTR_L' },
+    ];
+  });
+  const track = (id: string): TramTrack => {
+    const result = tracks.find((candidate) => candidate.id === id);
+    if (!result) throw new Error(`Missing authored tram track ${id}`);
+    return result;
+  };
+  const fitCurve = (curveId: string, incomingId: string, outgoingId: string): void => {
+    const curve = track(curveId);
+    const incoming = track(incomingId);
+    const outgoing = track(outgoingId);
+    curve.points[0] = [...(incoming.points.at(-1) ?? curve.points[0])] as Point2;
+    curve.points[curve.points.length - 1] = [...outgoing.points[0]] as Point2;
+  };
+  fitCurve('track-west-south-curve-forward', 'track-west-arm-forward', 'track-south-arm-forward');
+  fitCurve('track-west-south-curve-reverse', 'track-south-arm-reverse', 'track-west-arm-reverse');
+  fitCurve('track-north-south-curve-forward', 'track-north-arm-reverse', 'track-south-arm-forward');
+  fitCurve('track-north-south-curve-reverse', 'track-south-arm-reverse', 'track-north-arm-forward');
+  fitCurve('track-west-north-curve-forward', 'track-west-arm-forward', 'track-north-arm-forward');
+  fitCurve('track-west-north-curve-reverse', 'track-north-arm-reverse', 'track-west-arm-reverse');
+  for (const item of tracks) item.points = densifyLinear(item.points);
+  return tracks;
 }
 
 function withoutDuplicateJoints(parts: Point2[][]): Point2[] {
@@ -238,6 +404,7 @@ function buildNetwork(): TrafficNetwork {
   const routes: TrafficRoute[] = [];
   const crossings: TrafficCrossing[] = [];
   const signals: TrafficSignal[] = [];
+  const tramTracks = buildTramTracks();
   const roadSurfaces: TrafficRoadSurface[] = [
     { id: 'north-east-in', centerline: APPROACHES[0].inbound, width: 10 },
     { id: 'north-east-out', centerline: APPROACHES[0].outbound, width: 14 },
@@ -317,9 +484,38 @@ function buildNetwork(): TrafficNetwork {
     const stopPose = samplePolyline(approach.inbound, stopDistance);
     const stopLine = stopPose.point;
     const heading = stopPose.heading;
-    const vehicleGroup = `vehicle-${approach.id}`;
+    const vehicleGroups = signalGroups(approach.id).entry;
     const pedestrianGroup = crossings.find((crossing) => crossing.approach === approach.id && crossing.carriageway === 'inbound')?.signalGroup ?? 'ped-01';
-    signals.push({ id: `signal-${approach.id}`, approach: approach.id, position: stopLine, heading, vehicleGroup, pedestrianGroup });
+    signals.push({
+      id: `signal-entry-${approach.id}`,
+      approach: approach.id,
+      position: stopLine,
+      heading,
+      kind: 'entry',
+      vehicleGroup: vehicleGroups[0],
+      vehicleGroups,
+      pedestrianGroup,
+      sourcePosition: 'locally-fitted-to-scene',
+    });
+  }
+
+  // Stanowiska na tarczy leżą 7 m przed wlotem, który przecina ruch krążący.
+  for (let approachIndex = 0; approachIndex < APPROACHES.length; approachIndex += 1) {
+    const approach = APPROACHES[approachIndex];
+    const precedingSegment = ROUNDABOUT[(approachIndex + ROUNDABOUT.length - 1) % ROUNDABOUT.length];
+    const distance = Math.max(0, polylineLength(precedingSegment) - 7);
+    const pose = samplePolyline(precedingSegment, distance);
+    const vehicleGroups = signalGroups(approach.id).ring;
+    signals.push({
+      id: `signal-ring-${approach.id}`,
+      approach: approach.id,
+      position: pose.point,
+      heading: pose.heading,
+      kind: 'ring',
+      vehicleGroup: vehicleGroups[0],
+      vehicleGroups,
+      sourcePosition: 'locally-fitted-to-scene',
+    });
   }
 
   const ringOuter = withoutDuplicateJoints(ROUNDABOUT);
@@ -339,6 +535,26 @@ function buildNetwork(): TrafficNetwork {
       const inner = turn === 'left' || turn === 'u-turn';
       const inboundPoints = offsetPolyline(source.inbound, inner ? 1.55 : -1.55);
       const inboundCrossing = CROSSING_PLAN.find((crossing) => crossing.approach === source.id && crossing.carriageway === 'inbound');
+      const entryStop = Math.max(0, inboundCrossing ? nearestDistanceOnPolyline(inboundPoints, inboundCrossing.center) - 3.5 : polylineLength(inboundPoints) - 9);
+      const laneIndex = inner ? 1 : 0;
+      const signalStops: TrafficSignalStop[] = [{
+        distance: entryStop,
+        signalGroup: signalGroups(source.id).entry[laneIndex],
+        type: 'entry',
+        conflictZoneId: `ring-zone-${sourceIndex + 1}`,
+      }];
+      let travelled = polylineLength(inboundPoints);
+      for (let segment = 0; segment < ringParts.length; segment += 1) {
+        const ringPart = offsetPolyline(ringParts[segment], inner ? 1.7 : -1.7);
+        const targetIndex = (sourceIndex + segment + 1) % APPROACHES.length;
+        signalStops.push({
+          distance: travelled + Math.max(0, polylineLength(ringPart) - 7),
+          signalGroup: signalGroups(APPROACHES[targetIndex].id).ring[laneIndex],
+          type: 'ring',
+          conflictZoneId: `ring-zone-${targetIndex + 1}`,
+        });
+        travelled += polylineLength(ringPart);
+      }
       const points = withoutDuplicateJoints([
         inboundPoints,
         ...ringParts.map((part) => offsetPolyline(part, inner ? 1.7 : -1.7)),
@@ -352,34 +568,84 @@ function buildNetwork(): TrafficNetwork {
         turn,
         signalGroup: `vehicle-${source.id}-${turn}`,
         approach: source.id,
-        stopAt: Math.max(0, inboundCrossing ? nearestDistanceOnPolyline(inboundPoints, inboundCrossing.center) - 3.5 : polylineLength(inboundPoints) - 9),
+        stopAt: entryStop,
+        signalStops,
       });
     }
   }
 
-  const tramLines: Point2[][] = [
-    [[-169.9, 100.3], [-150, 91], [-118, 76], [-70, 50], [-31.2, 30.3], [-4.2, -16.4], [-36, -97], [-70.7, -184.3]],
-    [[74.1, 183], [54, 126], [20.7, 46.1], [-4.2, -16.4], [-36, -97], [-70.7, -184.3]],
-  ];
-  tramLines.forEach((points, index) => {
-    for (const [suffix, routePoints] of [['a', points], ['b', [...points].reverse()]] as const) {
-      const id = `tram-${index + 1}${suffix}`;
-      lanes.push({ id, kind: 'tram', points: routePoints, speedLimit: 11.1, successors: [], permittedModes: ['tram'] });
-      const stopPosition: Point2 = index === 0 ? [-31, -89] : [43, 106];
-      const junctionDistance = nearestDistanceOnPolyline(routePoints, [-4.2, -16.4]);
-      const firstSignal = Math.max(2, junctionDistance - 12);
-      const secondSignal = Math.min(polylineLength(routePoints) - 2, junctionDistance + 10);
-      routes.push({
-        id, mode: 'tram', points: routePoints, laneIds: [id], turn: 'transit', signalGroup: `transit-${index + 1}-entry`,
-        stopAt: firstSignal,
-        signalStops: [
-          { distance: firstSignal, signalGroup: `transit-${index + 1}-entry` },
-          { distance: secondSignal, signalGroup: `transit-${index + 1}-ring` },
-        ],
-        dwellAt: nearestDistanceOnPolyline(routePoints, stopPosition),
-      });
+  const trackById = (): Map<string, TramTrack> => new Map(tramTracks.map((track) => [track.id, track]));
+  const addTramRoute = (id: string, relationIndex: number, trackIds: string[], stopPosition: Point2): void => {
+    const points: Point2[] = [];
+    const trackSections: TrafficTrackSection[] = [];
+    let travelled = 0;
+    let centralStart = Number.POSITIVE_INFINITY;
+    let centralEnd = 0;
+    for (const trackId of trackIds) {
+      const track = trackById().get(trackId);
+      if (!track) throw new Error(`Missing tram track ${trackId}`);
+      const previous = points.at(-1);
+      const first = track.points[0];
+      if (previous && Math.hypot(previous[0] - first[0], previous[1] - first[1]) > 0.05) {
+        const connectorId = `track-connector-${id}-${trackSections.length + 1}`;
+        const connectorPoints = sampleCentripetalPolyline([previous, first]);
+        const connector: TramTrack = {
+          id: connectorId,
+          corridorId: `connector-${id}`,
+          direction: 'forward',
+          points: connectorPoints,
+          gauge: 1.435,
+          centerOffset: 1.55,
+          source: 'BDOT10k OT_SKTR_L',
+        };
+        tramTracks.push(connector);
+        const connectorLength = polylineLength(connectorPoints);
+        points.push(...connectorPoints.slice(1));
+        trackSections.push({ trackId: connectorId, startDistance: travelled, endDistance: travelled + connectorLength, trackStartDistance: 0, conflictZoneId: 'tram-intersection' });
+        centralStart = Math.min(centralStart, travelled);
+        travelled += connectorLength;
+        centralEnd = travelled;
+      }
+      const sectionLength = polylineLength(track.points);
+      if (points.length === 0) points.push(...track.points);
+      else points.push(...track.points.slice(1));
+      const conflictZoneId = track.corridorId.endsWith('-curve') ? 'tram-intersection' : undefined;
+      trackSections.push({ trackId, startDistance: travelled, endDistance: travelled + sectionLength, trackStartDistance: 0, conflictZoneId });
+      if (conflictZoneId) {
+        centralStart = Math.min(centralStart, travelled);
+        centralEnd = travelled + sectionLength;
+      }
+      travelled += sectionLength;
     }
-  });
+    const firstSignal = Math.max(2, centralStart - 12);
+    const secondSignal = Math.min(travelled - 2, centralEnd + 10);
+    routes.push({
+      id,
+      mode: 'tram',
+      points,
+      laneIds: trackSections.map((section) => section.trackId),
+      trackSections,
+      turn: 'transit',
+      signalGroup: `transit-${relationIndex}-entry`,
+      stopAt: firstSignal,
+      signalStops: [
+        { distance: firstSignal, signalGroup: `transit-${relationIndex}-entry`, type: 'transit', conflictZoneId: 'tram-intersection' },
+        { distance: secondSignal, signalGroup: `transit-${relationIndex}-ring`, type: 'transit', conflictZoneId: 'tram-intersection' },
+      ],
+      dwellAt: nearestDistanceOnPolyline(points, stopPosition),
+      tramConflictEntry: Math.max(0, centralStart - 11),
+      tramConflictExit: Math.min(travelled, centralEnd + 11),
+    });
+  };
+
+  addTramRoute('tram-west-south', 1, ['track-west-arm-forward', 'track-west-south-curve-forward', 'track-south-arm-forward'], [-31, -89]);
+  addTramRoute('tram-south-west', 1, ['track-south-arm-reverse', 'track-west-south-curve-reverse', 'track-west-arm-reverse'], [-31, -89]);
+  addTramRoute('tram-north-south', 2, ['track-north-arm-reverse', 'track-north-south-curve-forward', 'track-south-arm-forward'], [43, 106]);
+  addTramRoute('tram-south-north', 2, ['track-south-arm-reverse', 'track-north-south-curve-reverse', 'track-north-arm-forward'], [-31, -89]);
+  addTramRoute('tram-west-north', 3, ['track-west-arm-forward', 'track-west-north-curve-forward', 'track-north-arm-forward'], [43, 106]);
+  addTramRoute('tram-north-west', 3, ['track-north-arm-reverse', 'track-west-north-curve-reverse', 'track-west-arm-reverse'], [43, 106]);
+
+  for (const track of tramTracks) lanes.push({ id: track.id, kind: 'tram', points: track.points, speedLimit: 11.1, successors: [], permittedModes: ['tram'] });
 
   const mappedBusBase = routes.find((route) => route.id === 'south-west-straight');
   if (mappedBusBase) routes.push({
@@ -404,17 +670,17 @@ function buildNetwork(): TrafficNetwork {
     });
   }
 
-  const vehicleGroups = APPROACHES.flatMap((item) => Object.keys(TURN_STEPS).map((turn) => `vehicle-${item.id}-${turn}`));
-  const transitGroups = ['transit-1-entry', 'transit-1-ring', 'transit-2-entry', 'transit-2-ring'];
+  const vehicleGroups = Array.from({ length: 16 }, (_, index) => `K${String(index + 1).padStart(2, '0')}`);
+  const transitGroups = Array.from({ length: 3 }, (_, index) => [`transit-${index + 1}-entry`, `transit-${index + 1}-ring`]).flat();
   const movementConflicts: Record<string, string[]> = {};
   for (const vehicle of vehicleGroups) {
-    const approach = APPROACHES.find((item) => vehicle.startsWith(`vehicle-${item.id}-`));
+    const approachId = SIGNAL_APPROACH_ORDER.find((id) => [...signalGroups(id).entry, ...signalGroups(id).ring].includes(vehicle));
     const pedestrianConflicts = crossings
-      .filter((crossing) => crossing.approach === approach?.id)
+      .filter((crossing) => crossing.approach === approachId)
       .map((crossing) => crossing.signalGroup);
-    if (approach?.id === 'north-east') pedestrianConflicts.push('ped-09');
-    if (approach?.id === 'north-west') pedestrianConflicts.push('ped-10');
-    if (approach?.id === 'south-west') pedestrianConflicts.push('ped-11');
+    if (approachId === 'north-east') pedestrianConflicts.push('ped-09');
+    if (approachId === 'north-west') pedestrianConflicts.push('ped-10');
+    if (approachId === 'south-west') pedestrianConflicts.push('ped-11');
     movementConflicts[vehicle] = [...vehicleGroups.filter((group) => group !== vehicle), ...pedestrianConflicts, ...transitGroups];
   }
   for (const pedestrian of pedestrianGroups) {
@@ -424,7 +690,8 @@ function buildNetwork(): TrafficNetwork {
   for (const crossing of crossings) crossing.conflictsWith = [...(movementConflicts[crossing.signalGroup] ?? [])];
   for (const transit of transitGroups) movementConflicts[transit] = [...vehicleGroups, ...pedestrianGroups.map((group) => group.id), ...transitGroups.filter((group) => group !== transit)];
 
-  const trajectoryConflicts: Record<string, string[]> = Object.fromEntries(vehicleGroups.map((group) => [group, []]));
+  const relationGroups = routes.filter((route) => route.mode === 'car').map((route) => route.signalGroup);
+  const trajectoryConflicts: Record<string, string[]> = Object.fromEntries(relationGroups.map((group) => [group, []]));
   const carRoutes = routes.filter((route) => route.mode === 'car');
   for (let left = 0; left < carRoutes.length; left += 1) {
     for (let right = left + 1; right < carRoutes.length; right += 1) {
@@ -438,15 +705,13 @@ function buildNetwork(): TrafficNetwork {
     }
   }
 
-  const conflictZones: TrafficConflictZone[] = ROUNDABOUT.map((segment, index) => ({
+  const conflictZones: TrafficConflictZone[] = APPROACHES.map((approach, index) => ({
     id: `ring-zone-${index + 1}`,
-    center: segment[Math.floor(segment.length / 2)],
+    center: signals.find((signal) => signal.kind === 'ring' && signal.approach === approach.id)?.position ?? approach.node,
     radius: 10,
-    groups: [...vehicleGroups.filter((group) => {
-      const route = routes.find((candidate) => candidate.mode === 'car' && candidate.signalGroup === group);
-      return route?.points.some((point) => distanceToPolyline(point, segment) < 3.2) ?? false;
-    }), ...transitGroups],
+    groups: [...vehicleGroups, ...transitGroups],
   }));
+  conflictZones.push({ id: 'tram-intersection', center: [-5, 18], radius: 34, groups: [...transitGroups] });
   const downstreamSectors: TrafficDownstreamSector[] = APPROACHES.map((approach) => ({
     id: `downstream-${approach.id}`,
     capacityMetres: polylineLength(approach.outbound) - 6,
@@ -457,14 +722,19 @@ function buildNetwork(): TrafficNetwork {
     }).map((route) => route.id),
   }));
   for (const route of routes) {
-    route.orderedStopLines = route.signalStops ?? (route.stopAt === undefined ? [] : [{ distance: route.stopAt, signalGroup: route.signalGroup }]);
-    route.conflictZoneIds = conflictZones.filter((zone) => zone.groups.includes(route.signalGroup) || route.mode === 'tram').map((zone) => zone.id);
+    route.orderedStopLines = route.signalStops ?? (route.stopAt === undefined ? [] : [{ distance: route.stopAt, signalGroup: route.signalGroup, type: 'entry', conflictZoneId: 'ring-zone-1' }]);
+    route.conflictZoneIds = [...new Set(route.signalStops?.map((stop) => stop.conflictZoneId) ?? [])];
     route.downstreamSectorIds = downstreamSectors.filter((sector) => sector.routeIds.includes(route.id)).map((sector) => sector.id);
   }
-  const detectors: TrafficDetector[] = carRoutes.map((route) => {
-    const distance = Math.max(0, (route.stopAt ?? 25) - 22);
-    return { id: `detector-${route.signalGroup}`, group: route.signalGroup, distance, position: samplePolyline(route.points, distance).point };
-  });
+  const detectors: TrafficDetector[] = [];
+  for (let index = 0; index < 99; index += 1) {
+    const group = vehicleGroups[index % vehicleGroups.length];
+    const station = signals.find((candidate) => candidate.vehicleGroups.includes(group));
+    if (!station) continue;
+    const setback = 5 + Math.floor(index / vehicleGroups.length) * 3.5;
+    const position: Point2 = [station.position[0] - Math.cos(station.heading) * setback, station.position[1] - Math.sin(station.heading) * setback];
+    detectors.push({ id: `detector-${String(index + 1).padStart(3, '0')}`, group, distance: setback, position });
+  }
   const allGroups = [...vehicleGroups, ...pedestrianGroups.map((group) => group.id), ...transitGroups];
   const signalIntergreens: Record<string, Record<string, number>> = {};
   for (const from of allGroups) {
@@ -502,6 +772,16 @@ function buildNetwork(): TrafficNetwork {
     signalIntergreens,
     roundaboutLaneChanges: false,
     roadSurfaces,
+    tramTracks,
+    provenance: {
+      trafficSignalPlan: {
+        title: 'Wybrane wdrożenia firmy MSR TRAFFIC — Miasto Poznań / ALDESA / SAFEGE',
+        url: 'https://www.klir.pl/biuletyny/100-10_Wybrane_wdrozenia_firmy_MSR_TRAFFIC.pdf',
+        figure: 'rysunek 2.2',
+      },
+      mappedPositions: signals.map((signal) => signal.id),
+      locallyFittedPositions: signals.map((signal) => `${signal.id}:${signal.position[0].toFixed(3)},${signal.position[1].toFixed(3)}`),
+    },
   };
 }
 
@@ -538,25 +818,45 @@ export function roadVehicleContained(point: Point2, heading: number, length: num
   return true;
 }
 
+interface PolylineMetrics { total: number; cumulative: number[] }
+const POLYLINE_METRICS = new WeakMap<Point2[], PolylineMetrics>();
+
+function polylineMetrics(points: Point2[]): PolylineMetrics {
+  const cached = POLYLINE_METRICS.get(points);
+  if (cached) return cached;
+  const cumulative = [0];
+  for (let index = 1; index < points.length; index += 1) {
+    cumulative.push(cumulative[index - 1] + Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]));
+  }
+  const metrics = { total: cumulative.at(-1) ?? 0, cumulative };
+  POLYLINE_METRICS.set(points, metrics);
+  return metrics;
+}
+
 export function polylineLength(points: Point2[]): number {
-  let length = 0;
-  for (let index = 1; index < points.length; index += 1) length += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
-  return length;
+  return polylineMetrics(points).total;
 }
 
 export function samplePolyline(points: Point2[], distance: number): { point: Point2; heading: number } {
-  let remaining = Math.max(0, distance);
-  for (let index = 1; index < points.length; index += 1) {
+  const metrics = polylineMetrics(points);
+  const target = Math.max(0, Math.min(metrics.total, distance));
+  let low = 1;
+  let high = Math.max(1, points.length - 1);
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if ((metrics.cumulative[middle] ?? metrics.total) < target) low = middle + 1;
+    else high = middle;
+  }
+  const index = Math.min(points.length - 1, low);
+  if (index >= 1) {
     const before = points[index - 1];
     const after = points[index];
     const dx = after[0] - before[0];
     const dy = after[1] - before[1];
     const length = Math.hypot(dx, dy);
-    if (remaining <= length || index === points.length - 1) {
-      const t = length === 0 ? 0 : Math.min(1, remaining / length);
-      return { point: [before[0] + dx * t, before[1] + dy * t], heading: Math.atan2(dy, dx) };
-    }
-    remaining -= length;
+    const segmentStart = metrics.cumulative[index - 1] ?? 0;
+    const t = length === 0 ? 0 : Math.min(1, Math.max(0, (target - segmentStart) / length));
+    return { point: [before[0] + dx * t, before[1] + dy * t], heading: Math.atan2(dy, dx) };
   }
   return { point: points.at(-1) ?? [0, 0], heading: 0 };
 }

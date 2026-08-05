@@ -6,12 +6,28 @@ import type { TrafficDensity } from '../../src/traffic-simulation.ts';
 
 const approaches: ApproachId[] = ['north-east', 'south-east', 'south-west', 'north-west'];
 
+function pointToPolylineDistance(point: [number, number], points: Array<[number, number]>): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < points.length; index += 1) {
+    const a = points[index - 1];
+    const b = points[index];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const squared = dx * dx + dy * dy;
+    const progress = squared === 0 ? 0 : Math.max(0, Math.min(1, ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / squared));
+    best = Math.min(best, Math.hypot(point[0] - (a[0] + dx * progress), point[1] - (a[1] + dy * progress)));
+  }
+  return best;
+}
+
 describe('authored traffic topology', () => {
   it('is finite, local, connected, and mode-safe', () => {
     expect(TRAFFIC_NETWORK.schema).toBe('rondo-rataje-authored-traffic');
     expect(TRAFFIC_NETWORK.disclaimer).toMatch(/nie przedstawia ruchu na żywo/i);
     expect(TRAFFIC_NETWORK.portals).toHaveLength(4);
-    expect(TRAFFIC_NETWORK.signals).toHaveLength(4);
+    expect(TRAFFIC_NETWORK.signals).toHaveLength(8);
+    expect(TRAFFIC_NETWORK.signals.filter((signal) => signal.kind === 'entry')).toHaveLength(4);
+    expect(TRAFFIC_NETWORK.signals.filter((signal) => signal.kind === 'ring')).toHaveLength(4);
     expect(TRAFFIC_NETWORK.crossings).toHaveLength(8);
 
     const lanes = new Map(TRAFFIC_NETWORK.lanes.map((lane) => [lane.id, lane]));
@@ -38,6 +54,7 @@ describe('authored traffic topology', () => {
         expect(route.signalStops?.[0].signalGroup).toMatch(/-entry$/);
         expect(route.signalStops?.[1].signalGroup).toMatch(/-ring$/);
         expect(route.signalStops?.[1].distance).toBeGreaterThan(route.signalStops?.[0].distance ?? 0);
+        expect(route.signalStops?.every((stop) => stop.type === 'transit' && stop.conflictZoneId === 'tram-intersection')).toBe(true);
       }
     }
   });
@@ -60,7 +77,7 @@ describe('authored traffic topology', () => {
       ];
       expect(center).toEqual(expectedCenters.get(crossing.id));
     }
-    for (const signal of TRAFFIC_NETWORK.signals) {
+    for (const signal of TRAFFIC_NETWORK.signals.filter((candidate) => candidate.kind === 'entry')) {
       const crossing = TRAFFIC_NETWORK.crossings.find((item) => item.approach === signal.approach && item.carriageway === 'inbound');
       expect(crossing).toBeDefined();
       const center: [number, number] = [
@@ -69,6 +86,45 @@ describe('authored traffic topology', () => {
       ];
       expect(Math.hypot(signal.position[0] - center[0], signal.position[1] - center[1])).toBeLessThan(5);
     }
+  });
+
+  it('normalizes 16 physical K groups and checkpoints every encountered ring station', () => {
+    const groups = [...new Set(TRAFFIC_NETWORK.signals.flatMap((signal) => signal.vehicleGroups))].sort();
+    expect(groups).toEqual(Array.from({ length: 16 }, (_, index) => `K${String(index + 1).padStart(2, '0')}`));
+    expect(TRAFFIC_NETWORK.provenance.trafficSignalPlan).toMatchObject({ figure: 'rysunek 2.2' });
+    expect(TRAFFIC_NETWORK.provenance.trafficSignalPlan.url).toMatch(/MSR_TRAFFIC\.pdf$/);
+    expect(TRAFFIC_NETWORK.provenance.mappedPositions).toHaveLength(8);
+    expect(TRAFFIC_NETWORK.provenance.locallyFittedPositions).toHaveLength(8);
+    for (const route of TRAFFIC_NETWORK.routes.filter((candidate) => candidate.mode === 'car')) {
+      const expectedStops = route.turn === 'right' ? 1 : route.turn === 'straight' ? 2 : route.turn === 'left' ? 3 : 4;
+      expect(route.signalStops, route.id).toHaveLength(expectedStops);
+      expect(route.signalStops?.[0].type).toBe('entry');
+      expect(route.signalStops?.slice(1).every((stop) => stop.type === 'ring')).toBe(true);
+      expect(route.signalStops?.every((stop, index, stops) => index === 0 || stop.distance > stops[index - 1].distance)).toBe(true);
+    }
+  });
+
+  it('builds two directional tracks for all three BDOT relations from one dense geometry', () => {
+    const tramRoutes = TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'tram');
+    expect(tramRoutes.map((route) => route.id).sort()).toEqual([
+      'tram-north-south', 'tram-north-west', 'tram-south-north', 'tram-south-west', 'tram-west-north', 'tram-west-south',
+    ]);
+    for (const track of TRAFFIC_NETWORK.tramTracks) {
+      for (let index = 1; index < track.points.length; index += 1) {
+        expect(Math.hypot(track.points[index][0] - track.points[index - 1][0], track.points[index][1] - track.points[index - 1][1])).toBeLessThanOrEqual(0.5);
+      }
+    }
+    for (const corridor of ['west-arm', 'north-arm', 'south-arm', 'west-south-curve', 'north-south-curve', 'west-north-curve']) {
+      const forward = TRAFFIC_NETWORK.tramTracks.find((track) => track.id === `track-${corridor}-forward`);
+      const reverse = TRAFFIC_NETWORK.tramTracks.find((track) => track.id === `track-${corridor}-reverse`);
+      expect(forward).toBeDefined();
+      expect(reverse).toBeDefined();
+      expect(Math.min(...(forward?.points ?? []).map((point) => pointToPolylineDistance(point, reverse?.points ?? [])))).toBeGreaterThanOrEqual(2.9);
+      expect(Math.min(...(reverse?.points ?? []).map((point) => pointToPolylineDistance(point, forward?.points ?? [])))).toBeGreaterThanOrEqual(2.9);
+    }
+    const westSouth = tramRoutes.find((route) => route.id === 'tram-west-south');
+    const westNorth = tramRoutes.find((route) => route.id === 'tram-west-north');
+    expect(westSouth?.trackSections?.[0].trackId).toBe(westNorth?.trackSections?.[0].trackId);
   });
 
   it('provides every turn from each approach without illegal private-car lanes', () => {
@@ -209,4 +265,16 @@ describe('seeded fixed-step microsimulation', () => {
     expect(simulation.agents.every((agent) => agent.mode !== ('pedestrian' as never))).toBe(true);
     expect(Object.keys(simulation.counts)).toEqual(['cars', 'buses', 'trams']);
   });
+
+  it('keeps tram track spacing and the intersection reservation overlap-free', () => {
+    const simulation = new TrafficSimulation();
+    simulation.setDensity('high');
+    simulation.setTramPriority('standard');
+    simulation.reset(2026);
+    for (let elapsed = 0; elapsed < 900; elapsed += 0.25) simulation.advance(0.25);
+    expect(simulation.tramOverlapViolations).toBe(0);
+    expect(simulation.tramReservationOverlapViolations).toBe(0);
+    expect(Object.keys(simulation.activeTramReservations).length).toBeLessThanOrEqual(1);
+    expect(simulation.agents.filter((agent) => agent.mode === 'tram').every((agent) => simulation.trackId(agent) !== undefined)).toBe(true);
+  }, 15_000);
 });

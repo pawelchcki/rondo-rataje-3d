@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
+    "test:traffic-long": "LONG_TRAFFIC_TESTS=1 vitest run tests/unit/tram-safety-long.test.ts",
     "test:watch": "vitest",
     "test:smoke": "playwright test",
     "data:refresh": "tsx scripts/refresh-data.ts"

@@ -9,8 +9,9 @@ interface SignalMaterials {
   red: THREE.MeshStandardMaterial;
   amber: THREE.MeshStandardMaterial;
   green: THREE.MeshStandardMaterial;
-  pedestrianRed: THREE.MeshStandardMaterial;
-  pedestrianGreen: THREE.MeshStandardMaterial;
+  pedestrianRed?: THREE.MeshStandardMaterial;
+  pedestrianGreen?: THREE.MeshStandardMaterial;
+  vehicleGroup: string;
   definition: TrafficSignal;
 }
 
@@ -153,11 +154,17 @@ export class TrafficRenderer {
       }
     }
     for (const signal of TRAFFIC_NETWORK.signals) {
-      const roadWidth = TRAFFIC_NETWORK.roadSurfaces.find((surface) => surface.id === `${signal.approach}-in`)?.width ?? 10;
+      const roadWidth = signal.kind === 'ring' ? 12 : TRAFFIC_NETWORK.roadSurfaces.find((surface) => surface.id === `${signal.approach}-in`)?.width ?? 10;
       this.addRoadRectangle(signal.position, signal.heading, 0.42, roadWidth, 0xe9e7d8, 0.4);
-      const route = TRAFFIC_NETWORK.routes.find((item) => item.mode === 'car' && item.approach === signal.approach && item.turn === 'right');
-      const arrowPoint = samplePolyline(route?.points ?? [signal.position], Math.max(0, (route?.stopAt ?? 12) - 12));
-      this.addArrow(arrowPoint.point, arrowPoint.heading);
+      if (signal.kind === 'entry') {
+        const route = TRAFFIC_NETWORK.routes.find((item) => item.mode === 'car' && item.approach === signal.approach && item.turn === 'right');
+        const arrowPoint = samplePolyline(route?.points ?? [signal.position], Math.max(0, (route?.stopAt ?? 12) - 12));
+        this.addArrow(arrowPoint.point, arrowPoint.heading);
+      }
+    }
+    for (const detector of TRAFFIC_NETWORK.detectors) {
+      const signal = TRAFFIC_NETWORK.signals.find((candidate) => candidate.vehicleGroups.includes(detector.group));
+      this.addRoadRectangle(detector.position, signal?.heading ?? 0, 0.18, 2.35, 0x343b39, 0.405);
     }
   }
 
@@ -220,34 +227,47 @@ export class TrafficRenderer {
       pole.position.y = 2.15;
       const arm = new THREE.Mesh(new THREE.BoxGeometry(4.8, 0.13, 0.13), poleMaterial.clone());
       arm.position.set(2.25, 4.08, 0);
-      const head = new THREE.Mesh(new THREE.BoxGeometry(0.48, 1.25, 0.42), new THREE.MeshStandardMaterial({ color: 0x202724, roughness: 0.6 }));
-      head.position.set(4.35, 3.62, 0);
-      const pedestrianHead = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.82, 0.38), new THREE.MeshStandardMaterial({ color: 0x202724, roughness: 0.6 }));
-      pedestrianHead.position.set(0, 2.65, 0);
-      const button = primitiveBox([0.18, 0.24, 0.16], 0xd6c14d, [0, 1.2, -0.13]);
-      group.add(pole, arm, head, pedestrianHead, button);
+      group.add(pole, arm);
 
       const makeLamp = (color: number): THREE.MeshStandardMaterial => new THREE.MeshStandardMaterial({ color: 0x302f2a, emissive: color, emissiveIntensity: 0.03, roughness: 0.35 });
-      const red = makeLamp(0xff2d22);
-      const amber = makeLamp(0xffad22);
-      const green = makeLamp(0x36d66b);
-      const pedestrianRed = makeLamp(0xff2d22);
-      const pedestrianGreen = makeLamp(0x36d66b);
-      for (const [index, material] of [red, amber, green].entries()) {
-        const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.135, 10, 7), material);
-        lamp.position.set(4.35, 3.98 - index * 0.35, -0.22);
-        group.add(lamp);
+      for (const [headIndex, vehicleGroup] of definition.vehicleGroups.entries()) {
+        const headX = 3.45 + headIndex * 1.05;
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.48, 1.25, 0.42), new THREE.MeshStandardMaterial({ color: 0x202724, roughness: 0.6 }));
+        head.position.set(headX, 3.62, 0);
+        group.add(head);
+        const red = makeLamp(0xff2d22);
+        const amber = makeLamp(0xffad22);
+        const green = makeLamp(0x36d66b);
+        for (const [lampIndex, material] of [red, amber, green].entries()) {
+          const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.135, 10, 7), material);
+          lamp.position.set(headX, 3.98 - lampIndex * 0.35, -0.22);
+          group.add(lamp);
+        }
+        this.signalMaterials.push({ red, amber, green, vehicleGroup, definition });
       }
-      for (const [index, material] of [pedestrianRed, pedestrianGreen].entries()) {
-        const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.13, 9, 6), material);
-        lamp.position.set(0, 2.84 - index * 0.37, -0.2);
-        group.add(lamp);
+      if (definition.pedestrianGroup) {
+        const pedestrianHead = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.82, 0.38), new THREE.MeshStandardMaterial({ color: 0x202724, roughness: 0.6 }));
+        pedestrianHead.position.set(0, 2.65, 0);
+        const button = primitiveBox([0.18, 0.24, 0.16], 0xd6c14d, [0, 1.2, -0.13]);
+        group.add(pedestrianHead, button);
+        const pedestrianRed = makeLamp(0xff2d22);
+        const pedestrianGreen = makeLamp(0x36d66b);
+        for (const [lampIndex, material] of [pedestrianRed, pedestrianGreen].entries()) {
+          const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.13, 9, 6), material);
+          lamp.position.set(0, 2.84 - lampIndex * 0.37, -0.2);
+          group.add(lamp);
+        }
+        const materials = this.signalMaterials.find((candidate) => candidate.definition === definition);
+        if (materials) {
+          materials.pedestrianRed = pedestrianRed;
+          materials.pedestrianGreen = pedestrianGreen;
+        }
       }
       group.traverse((object) => { if (object instanceof THREE.Mesh) object.castShadow = true; });
+      group.name = `${definition.kind === 'ring' ? 'Tarcza ronda' : 'Wlot'} ${definition.vehicleGroups.join('/')}`;
       this.infrastructure.add(group);
-      this.signalMaterials.push({ red, amber, green, pedestrianRed, pedestrianGreen, definition });
     }
-    const groupsWithCombinedHead = new Set(TRAFFIC_NETWORK.signals.map((signal) => signal.pedestrianGroup));
+    const groupsWithCombinedHead = new Set(TRAFFIC_NETWORK.signals.map((signal) => signal.pedestrianGroup).filter((group): group is string => group !== undefined));
     for (const definition of TRAFFIC_NETWORK.pedestrianGroups.filter((group) => !groupsWithCombinedHead.has(group.id))) {
       const position = definition.points[0];
       const ground = this.sampler.relative(...position, this.exaggeration) + 0.4;
@@ -269,10 +289,18 @@ export class TrafficRenderer {
       this.infrastructure.add(group);
       this.pedestrianOnlyMaterials.push({ group: definition.id, red, green });
     }
-    for (const [index, position] of ([[-11, -22], [17, 41]] as Point2[]).entries()) {
+    const transitHeads = new Map<string, { point: Point2; heading: number }>();
+    for (const route of TRAFFIC_NETWORK.routes.filter((candidate) => candidate.mode === 'tram')) {
+      for (const stop of route.signalStops ?? []) {
+        if (!transitHeads.has(stop.signalGroup)) transitHeads.set(stop.signalGroup, samplePolyline(route.points, stop.distance));
+      }
+    }
+    for (const [signalGroup, pose] of transitHeads) {
+      const position = pose.point;
       const ground = this.sampler.relative(...position, this.exaggeration) + 0.42;
       const group = new THREE.Group();
       group.position.set(position[0], ground, -position[1]);
+      group.rotation.y = pose.heading;
       const pole = new THREE.Mesh(
         new THREE.CylinderGeometry(0.07, 0.09, 3.2, 7),
         new THREE.MeshStandardMaterial({ color: 0x45514c, roughness: 0.5, metalness: 0.5 }),
@@ -288,7 +316,7 @@ export class TrafficRenderer {
         group.add(lamp);
       }
       this.infrastructure.add(group);
-      this.transitMaterials.push({ group: `transit-${index + 1}`, red, green });
+      this.transitMaterials.push({ group: signalGroup, red, green });
     }
   }
 
@@ -299,7 +327,10 @@ export class TrafficRenderer {
         : agent.mode === 'bus'
           ? this.createBus()
           : this.createTram();
-      this.addAgentLabel(object, agent);
+      const labelTarget = agent.mode === 'tram'
+        ? object.children.find((child) => child.userData.tramModuleIndex === 1) as THREE.Group | undefined
+        : object;
+      this.addAgentLabel(labelTarget ?? object, agent);
       object.name = `Simulated ${agent.id}`;
       this.agentObjects.set(agent.id, object);
       this.agentLayer.add(object);
@@ -403,20 +434,35 @@ export class TrafficRenderer {
   }
 
   private createTram(): THREE.Group {
-    const group = new THREE.Group();
-    group.add(primitiveBox([18.5, 2.8, 2.35], 0x4b9557, [0, 1.72, 0]));
-    group.add(primitiveBox([17.8, 0.5, 2.39], 0xe0c534, [0, 1.15, 0]));
-    group.add(primitiveBox([16.5, 0.78, 2.42], 0x344e55, [-0.2, 2.32, 0]));
-    const roof = primitiveBox([13, 0.18, 1.65], 0xc2c1b7, [-0.5, 3.2, 0]);
-    group.add(roof);
-    const pantograph = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(2.2, 0.8, 0.05)),
-      new THREE.LineBasicMaterial({ color: 0x353d39 }),
-    );
-    pantograph.position.set(0, 3.72, 0);
-    pantograph.rotation.z = 0.35;
-    group.add(pantograph);
-    return group;
+    const train = new THREE.Group();
+    train.userData.articulatedTram = true;
+    for (let moduleIndex = 0; moduleIndex < 3; moduleIndex += 1) {
+      const module = new THREE.Group();
+      module.userData.tramModuleIndex = moduleIndex;
+      module.name = `Tram module ${moduleIndex + 1}`;
+      module.add(primitiveBox([5.9, 2.8, 2.35], 0x4b9557, [0, 1.72, 0]));
+      module.add(primitiveBox([5.75, 0.5, 2.39], 0xe0c534, [0, 1.15, 0]));
+      module.add(primitiveBox([5.25, 0.78, 2.42], 0x344e55, [-0.1, 2.32, 0]));
+      module.add(primitiveBox([4.4, 0.18, 1.65], 0xc2c1b7, [-0.1, 3.2, 0]));
+      if (moduleIndex === 1) {
+        const pantograph = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(2.2, 0.8, 0.05)),
+          new THREE.LineBasicMaterial({ color: 0x353d39 }),
+        );
+        pantograph.position.set(0, 3.72, 0);
+        pantograph.rotation.z = 0.35;
+        module.add(pantograph);
+      }
+      train.add(module);
+    }
+    for (let jointIndex = 0; jointIndex < 2; jointIndex += 1) {
+      const joint = new THREE.Group();
+      joint.userData.tramJointIndex = jointIndex;
+      joint.name = `Tram articulation ${jointIndex + 1}`;
+      joint.add(primitiveBox([0.5, 2.55, 2.18], 0x303a37, [0, 1.65, 0]));
+      train.add(joint);
+    }
+    return train;
   }
 
   sync(): void {
@@ -429,10 +475,35 @@ export class TrafficRenderer {
       const object = this.agentObjects.get(agent.id);
       if (!object) continue;
       const pose = this.simulation.pose(agent);
-      const ground = this.sampler.relative(...pose.point, this.exaggeration);
-      object.position.set(pose.point[0], ground + 0.42, -pose.point[1]);
-      object.rotation.y = pose.heading;
-      object.scale.setScalar(pose.scale);
+      if (agent.mode === 'tram') {
+        object.position.set(0, 0, 0);
+        object.rotation.set(0, 0, 0);
+        object.scale.setScalar(1);
+        const modulePoses = this.simulation.tramModulePoses(agent);
+        for (const child of object.children) {
+          const moduleIndex = child.userData.tramModuleIndex as number | undefined;
+          if (moduleIndex !== undefined) {
+            const modulePose = modulePoses[moduleIndex];
+            child.position.set(modulePose.point[0], this.sampler.relative(...modulePose.point, this.exaggeration) + 0.42, -modulePose.point[1]);
+            child.rotation.y = modulePose.heading;
+            child.scale.setScalar(modulePose.scale);
+          }
+          const jointIndex = child.userData.tramJointIndex as number | undefined;
+          if (jointIndex !== undefined) {
+            const a = modulePoses[jointIndex];
+            const b = modulePoses[jointIndex + 1];
+            const point: Point2 = [(a.point[0] + b.point[0]) / 2, (a.point[1] + b.point[1]) / 2];
+            child.position.set(point[0], this.sampler.relative(...point, this.exaggeration) + 0.42, -point[1]);
+            child.rotation.y = Math.atan2(b.point[1] - a.point[1], b.point[0] - a.point[0]);
+            child.scale.setScalar(Math.min(a.scale, b.scale));
+          }
+        }
+      } else {
+        const ground = this.sampler.relative(...pose.point, this.exaggeration);
+        object.position.set(pose.point[0], ground + 0.42, -pose.point[1]);
+        object.rotation.y = pose.heading;
+        object.scale.setScalar(pose.scale);
+      }
       const indicatorSide = agent.turn === 'right' ? 'right' : agent.turn === 'left' || agent.turn === 'u-turn' ? 'left' : undefined;
       const indicatorOn = Math.floor(this.simulation.elapsed * 2) % 2 === 0;
       object.traverse((child) => {
@@ -441,13 +512,15 @@ export class TrafficRenderer {
       });
     }
     for (const materials of this.signalMaterials) {
-      const vehicle = this.simulation.vehicleSignal(materials.definition.vehicleGroup);
+      const vehicle = this.simulation.vehicleSignal(materials.vehicleGroup);
       materials.red.emissiveIntensity = vehicle === 'red' ? 3.2 : 0.03;
       materials.amber.emissiveIntensity = vehicle === 'amber' ? 3.2 : 0.03;
       materials.green.emissiveIntensity = vehicle === 'green' ? 3.2 : 0.03;
-      const pedestrian = this.simulation.pedestrianSignal(materials.definition.pedestrianGroup);
-      materials.pedestrianRed.emissiveIntensity = pedestrian === 'stop' ? 3.2 : 0.03;
-      materials.pedestrianGreen.emissiveIntensity = pedestrian !== 'stop' ? 3.2 : 0.03;
+      if (materials.definition.pedestrianGroup && materials.pedestrianRed && materials.pedestrianGreen) {
+        const pedestrian = this.simulation.pedestrianSignal(materials.definition.pedestrianGroup);
+        materials.pedestrianRed.emissiveIntensity = pedestrian === 'stop' ? 3.2 : 0.03;
+        materials.pedestrianGreen.emissiveIntensity = pedestrian !== 'stop' ? 3.2 : 0.03;
+      }
     }
     for (const materials of this.transitMaterials) {
       const signal = this.simulation.vehicleSignal(materials.group);

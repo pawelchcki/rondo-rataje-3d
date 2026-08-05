@@ -87,8 +87,7 @@ const TARGETS: Record<TrafficDensity, AgentCounts> = {
 
 const DENSITY_TO_PROFILE: Record<TrafficDensity, DemandProfile> = { low: 'quiet', medium: 'typical', high: 'peak-2023' };
 const PROFILE_TO_DENSITY: Record<DemandProfile, TrafficDensity> = { quiet: 'low', typical: 'medium', 'peak-2023': 'high' };
-const APPROACH_ORDER: ApproachId[] = ['north-east', 'south-east', 'south-west', 'north-west'];
-const VEHICLE_GROUPS = TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'car').map((route) => route.signalGroup);
+const VEHICLE_GROUPS = [...new Set(TRAFFIC_NETWORK.signals.flatMap((signal) => signal.vehicleGroups))];
 const FIXED_STEP = 1 / 30;
 const MINIMUM_GREEN = 7;
 
@@ -141,7 +140,7 @@ function passengerEstimate(mode: TrafficMode, random: SeededRandom): number {
 }
 
 function approachOfVehicleGroup(group: string): ApproachId | undefined {
-  return APPROACH_ORDER.find((approach) => group.startsWith(`vehicle-${approach}-`));
+  return TRAFFIC_NETWORK.signals.find((signal) => signal.vehicleGroups.includes(group))?.approach;
 }
 
 export class TrafficSimulation {
@@ -158,6 +157,8 @@ export class TrafficSimulation {
   passengerAlightings = 0;
   vehicleDelaySeconds = 0;
   pedestrianConflictDelaySeconds = 0;
+  tramOverlapViolations = 0;
+  tramReservationOverlapViolations = 0;
   pedestrianDemandEnabled = true;
   private accumulator = 0;
   private activeVehicleGroup = VEHICLE_GROUPS[0];
@@ -170,6 +171,8 @@ export class TrafficSimulation {
   private seed = 2180;
   private vehicleCursor = 0;
   private groupWaitSeconds = new Map<string, number>();
+  private tramReservations = new Map<string, string>();
+  private overlappingTramPairs = new Set<string>();
 
   constructor() {
     this.reset(this.seed);
@@ -208,6 +211,26 @@ export class TrafficSimulation {
 
   get totalTransitPassengers(): number {
     return this.agents.filter((agent) => agent.mode !== 'car').reduce((sum, agent) => sum + agent.passengerCount, 0);
+  }
+
+  get activeTramReservations(): Record<string, string> {
+    return Object.fromEntries(this.tramReservations);
+  }
+
+  get occupiedInnerZones(): Record<string, string[]> {
+    return Object.fromEntries(TRAFFIC_NETWORK.conflictZones
+      .filter((zone) => zone.id.startsWith('ring-zone-'))
+      .map((zone) => [zone.id, this.agents
+        .filter((agent) => agent.mode !== 'tram')
+        .filter((agent) => {
+          const point = sampleSmoothPolyline(agent.route.points, agent.distance).point;
+          return Math.hypot(point[0] - zone.center[0], point[1] - zone.center[1]) <= zone.radius;
+        })
+        .map((agent) => agent.id)]));
+  }
+
+  trackId(agent: TrafficAgent): string | undefined {
+    return this.trackPosition(agent)?.trackId;
   }
 
   nextSignalStop(agent: TrafficAgent): { distance: number; signalGroup: string } | undefined {
@@ -249,7 +272,9 @@ export class TrafficSimulation {
     this.activeVehicleGroup = VEHICLE_GROUPS[0];
     this.activeTransitGroup = undefined;
     this.pendingTransitGroup = undefined;
-    this.signalStage = 'vehicle-green';
+    // Start all-red so pre-seeded vehicles already on the ring can be drained
+    // before the first conflicting entry is considered.
+    this.signalStage = 'intergreen';
     this.stageElapsed = 0;
     this.greenDuration = 18;
     this.intergreenDuration = 1.5;
@@ -262,6 +287,10 @@ export class TrafficSimulation {
     this.passengerAlightings = 0;
     this.vehicleDelaySeconds = 0;
     this.pedestrianConflictDelaySeconds = 0;
+    this.tramOverlapViolations = 0;
+    this.tramReservationOverlapViolations = 0;
+    this.tramReservations.clear();
+    this.overlappingTramPairs.clear();
     const random = new SeededRandom(this.seed);
     const targets = TARGETS[this.density];
     this.spawnMode('car', targets.cars, TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'car'), random);
@@ -308,7 +337,10 @@ export class TrafficSimulation {
       const length = polylineLength(route.points);
       const laneSlot = Math.floor(index / routes.length);
       const spacing = Math.max(modeLength(mode) + 2, length / Math.max(1, Math.ceil(count / routes.length)));
-      const distance = (laneSlot * spacing + random.next() * Math.min(3, spacing * 0.2)) % Math.max(1, length - 1);
+      const unconstrainedDistance = (laneSlot * spacing + random.next() * Math.min(3, spacing * 0.2)) % Math.max(1, length - 1);
+      const distance = mode === 'tram'
+        ? Math.min(modeLength(mode) / 2 + random.next() * 1.5, Math.max(modeLength(mode) / 2, (signalCheckpoints(route)[0]?.distance ?? 35) - modeLength(mode) - 2))
+        : unconstrainedDistance;
       const desiredSpeed = mode === 'tram' ? 8.5 + random.next() * 1.5 : mode === 'bus' ? 7.2 + random.next() * 1.4 : 7.8 + random.next() * 2.5;
       const checkpoints = signalCheckpoints(route);
       const signalCheckpointIndex = checkpoints.filter((checkpoint) => checkpoint.distance <= distance).length;
@@ -342,7 +374,39 @@ export class TrafficSimulation {
     const poses = new Map(this.agents.map((agent) => [agent.id, sampleSmoothPolyline(agent.route.points, agent.distance)]));
     const leaderGaps = new Map(this.agents.map((agent) => [agent.id, this.nearestLeaderGap(agent, poses)]));
     for (const agent of this.agents) this.stepAgent(agent, leaderGaps.get(agent.id), dt);
+    this.updateTramSafetyDiagnostics();
     this.updateVehicleWaits(dt);
+  }
+
+  private trackPosition(agent: TrafficAgent): { trackId: string; distance: number; remaining: number } | undefined {
+    const sections = agent.route.trackSections;
+    if (!sections || sections.length === 0) return undefined;
+    const section = sections.find((candidate) => agent.distance >= candidate.startDistance - 1e-6 && agent.distance < candidate.endDistance - 1e-6) ?? sections.at(-1);
+    if (!section) return undefined;
+    const distance = section.trackStartDistance + clamp(agent.distance - section.startDistance, 0, section.endDistance - section.startDistance);
+    return { trackId: section.trackId, distance, remaining: section.endDistance - agent.distance };
+  }
+
+  private updateTramSafetyDiagnostics(): void {
+    const trams = this.agents.filter((agent) => agent.mode === 'tram');
+    const activePairs = new Set<string>();
+    for (let left = 0; left < trams.length; left += 1) {
+      for (let right = left + 1; right < trams.length; right += 1) {
+        const a = trams[left];
+        const b = trams[right];
+        const aTrack = this.trackPosition(a);
+        const bTrack = this.trackPosition(b);
+        const aPose = sampleSmoothPolyline(a.route.points, a.distance);
+        const bPose = sampleSmoothPolyline(b.route.points, b.distance);
+        const sameTrackOverlap = aTrack?.trackId === bTrack?.trackId && Math.abs((aTrack?.distance ?? 0) - (bTrack?.distance ?? 0)) < (a.length + b.length) / 2 + 0.5;
+        const spatialOverlap = Math.hypot(aPose.point[0] - bPose.point[0], aPose.point[1] - bPose.point[1]) < 2.2;
+        if (!sameTrackOverlap && !spatialOverlap) continue;
+        const key = [a.id, b.id].sort().join(':');
+        activePairs.add(key);
+        if (!this.overlappingTramPairs.has(key)) this.tramOverlapViolations += 1;
+      }
+    }
+    this.overlappingTramPairs = activePairs;
   }
 
   private updatePedestrians(dt: number): void {
@@ -398,6 +462,19 @@ export class TrafficSimulation {
   }
 
   private nearestLeaderGap(agent: TrafficAgent, poses: Map<string, { point: Point2; heading: number }>): number | undefined {
+    if (agent.mode === 'tram') {
+      const position = this.trackPosition(agent);
+      if (position) {
+        let nearest = Number.POSITIVE_INFINITY;
+        for (const candidate of this.agents) {
+          if (candidate === agent || candidate.mode !== 'tram') continue;
+          const candidatePosition = this.trackPosition(candidate);
+          if (candidatePosition?.trackId !== position.trackId || candidatePosition.distance <= position.distance) continue;
+          nearest = Math.min(nearest, candidatePosition.distance - position.distance - (agent.length + candidate.length) / 2);
+        }
+        if (Number.isFinite(nearest)) return nearest;
+      }
+    }
     const pose = poses.get(agent.id);
     if (!pose) return undefined;
     const forward: Point2 = [Math.cos(pose.heading), Math.sin(pose.heading)];
@@ -450,6 +527,25 @@ export class TrafficSimulation {
     agent.dwellExtensionRemaining = Math.max(0, dwell - agent.dwellRemaining);
   }
 
+  private tramReservationStop(agent: TrafficAgent): number | undefined {
+    if (agent.mode !== 'tram' || agent.route.tramConflictEntry === undefined || agent.route.tramConflictExit === undefined) return undefined;
+    const zone = 'tram-intersection';
+    const owner = this.tramReservations.get(zone);
+    if (agent.distance > agent.route.tramConflictExit) {
+      if (owner === agent.id) this.tramReservations.delete(zone);
+      return undefined;
+    }
+    const distanceToEntry = agent.route.tramConflictEntry - agent.distance;
+    if (distanceToEntry < 42 && owner === undefined) this.tramReservations.set(zone, agent.id);
+    const currentOwner = this.tramReservations.get(zone);
+    if (currentOwner !== undefined && currentOwner !== agent.id) return agent.route.tramConflictEntry;
+    if (agent.distance >= agent.route.tramConflictEntry && currentOwner !== agent.id) {
+      this.tramReservationOverlapViolations += 1;
+      return agent.route.tramConflictEntry;
+    }
+    return undefined;
+  }
+
   private stepAgent(agent: TrafficAgent, leaderGap: number | undefined, dt: number): void {
     const routeLength = polylineLength(agent.route.points);
     agent.previousDistance = agent.distance;
@@ -467,6 +563,11 @@ export class TrafficSimulation {
     }
 
     let targetSpeed = agent.desiredSpeed;
+    const reservationStop = this.tramReservationStop(agent);
+    if (reservationStop !== undefined && agent.distance < reservationStop) {
+      const distanceToReservation = reservationStop - agent.distance;
+      targetSpeed = Math.min(targetSpeed, Math.sqrt(2 * 1.25 * Math.max(0, distanceToReservation - 0.8)));
+    }
     const dwellPoint = agent.route.dwellAt ?? routeLength * 0.46;
     if ((agent.mode === 'bus' || agent.mode === 'tram') && !agent.hasDwelled && agent.distance < dwellPoint) {
       const distanceToStop = dwellPoint - agent.distance;
@@ -518,9 +619,15 @@ export class TrafficSimulation {
     agent.acceleration += clamp(desiredAcceleration - agent.acceleration, -maximumJerk * dt, maximumJerk * dt);
     const nextSpeed = clamp(agent.speed + agent.acceleration * dt, 0, agent.desiredSpeed);
     let advance = Math.max(0, (agent.speed + nextSpeed) * 0.5 * dt);
-    if (leaderGap !== undefined) advance = Math.min(advance, Math.max(0, leaderGap - 0.25));
+    if (leaderGap !== undefined) advance = Math.min(advance, Math.max(0, leaderGap - (agent.mode === 'tram' ? 2 : 0.25)));
     let nextDistance = agent.distance + advance;
     agent.speed = nextSpeed;
+
+    if (reservationStop !== undefined && nextDistance >= reservationStop) {
+      nextDistance = Math.max(agent.distance, reservationStop - 0.8);
+      agent.speed = 0;
+      agent.acceleration = 0;
+    }
 
     if ((agent.mode === 'bus' || agent.mode === 'tram') && !agent.hasDwelled && agent.distance < dwellPoint && nextDistance >= dwellPoint) {
       agent.distance = dwellPoint;
@@ -551,6 +658,13 @@ export class TrafficSimulation {
     }
 
     if (agent.distance >= routeLength) {
+      if (agent.mode === 'tram' && Object.values(this.activeTramReservations).some((owner) => owner !== agent.id)) {
+        agent.distance = routeLength - 0.1;
+        agent.speed = 0;
+        agent.acceleration = 0;
+        return;
+      }
+      if (this.tramReservations.get('tram-intersection') === agent.id) this.tramReservations.delete('tram-intersection');
       agent.distance %= routeLength;
       agent.previousDistance = agent.distance;
       agent.spawnAge = 0;
@@ -571,7 +685,7 @@ export class TrafficSimulation {
 
   private updateVehicleWaits(dt: number): void {
     for (const group of VEHICLE_GROUPS) {
-      const queued = this.agents.some((agent) => agent.route.signalGroup === group && !agent.signalCleared && agent.speed < 0.5);
+      const queued = this.agents.some((agent) => this.nextSignalStop(agent)?.signalGroup === group && agent.speed < 0.5);
       this.groupWaitSeconds.set(group, queued && group !== this.activeVehicleGroup ? (this.groupWaitSeconds.get(group) ?? 0) + dt : 0);
     }
   }
@@ -582,7 +696,17 @@ export class TrafficSimulation {
 
   private groupIsSafe(group: string): boolean {
     const conflicts = TRAFFIC_NETWORK.movementConflicts[group] ?? [];
-    return this.activePedestrianGroups().every((pedestrian) => !conflicts.includes(pedestrian.id));
+    if (!this.activePedestrianGroups().every((pedestrian) => !conflicts.includes(pedestrian.id))) return false;
+    const zoneId = TRAFFIC_NETWORK.routes
+      .flatMap((route) => route.signalStops ?? [])
+      .find((stop) => stop.signalGroup === group)?.conflictZoneId;
+    if (zoneId === undefined) return true;
+    const stationGroups = TRAFFIC_NETWORK.signals.find((signal) => signal.vehicleGroups.includes(group))?.vehicleGroups ?? [group];
+    const conflictingOccupants = (this.occupiedInnerZones[zoneId] ?? [])
+      .map((id) => this.agents.find((agent) => agent.id === id))
+      .filter((agent): agent is TrafficAgent => agent !== undefined)
+      .filter((agent) => !stationGroups.includes(this.nextSignalStop(agent)?.signalGroup ?? ''));
+    return conflictingOccupants.length === 0;
   }
 
   private updateSignals(dt: number): void {
@@ -600,8 +724,18 @@ export class TrafficSimulation {
     const duration = this.signalStage === 'vehicle-green' ? this.greenDuration
       : this.signalStage === 'vehicle-amber' || this.signalStage === 'transit-amber' ? 3
         : this.signalStage === 'intergreen' || this.signalStage === 'transit-intergreen' ? this.intergreenDuration
-          : this.tramPriority === 'standard' ? 6 : 12;
+          : this.tramPriority === 'standard' ? 6 : this.tramPriority === 'absolute' ? 36 : 24;
     if (this.stageElapsed < duration) return;
+    if (this.signalStage === 'transit-green' && this.tramPriority !== 'standard' && this.activeTransitGroup) {
+      const corridor = this.activeTransitGroup.match(/^transit-\d+/)?.[0];
+      const clearing = this.agents.some((agent) => {
+        if (agent.mode !== 'tram' || agent.signalCheckpointIndex === 0) return false;
+        const next = signalCheckpoints(agent.route)[agent.signalCheckpointIndex];
+        return next?.signalGroup.startsWith(`${corridor}-`) ?? false;
+      });
+      const maximumHold = this.tramPriority === 'absolute' ? 60 : 45;
+      if (clearing && this.stageElapsed < maximumHold) return;
+    }
     this.stageElapsed -= duration;
     if (this.signalStage === 'vehicle-green') this.signalStage = 'vehicle-amber';
     else if (this.signalStage === 'vehicle-amber') {
@@ -644,8 +778,13 @@ export class TrafficSimulation {
   }
 
   private beginNextVehiclePhase(): void {
+    const ringGroups = new Set(TRAFFIC_NETWORK.signals.filter((signal) => signal.kind === 'ring').flatMap((signal) => signal.vehicleGroups));
+    const queuedRing = [...this.groupWaitSeconds.entries()]
+      .filter(([group, seconds]) => ringGroups.has(group) && seconds > 0)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    let next = queuedRing.find(([group]) => this.groupIsSafe(group))?.[0];
     const starved = [...this.groupWaitSeconds.entries()].filter(([, seconds]) => seconds >= 45).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    let next = starved.find(([group]) => this.groupIsSafe(group))?.[0];
+    next ??= starved.find(([group]) => this.groupIsSafe(group))?.[0];
     for (let offset = 1; !next && offset <= VEHICLE_GROUPS.length; offset += 1) {
       const index = (this.vehicleCursor + offset) % VEHICLE_GROUPS.length;
       const candidate = VEHICLE_GROUPS[index];
@@ -654,7 +793,11 @@ export class TrafficSimulation {
         this.vehicleCursor = index;
       }
     }
-    next ??= this.activeVehicleGroup;
+    if (!next) {
+      this.signalStage = 'intergreen';
+      this.stageElapsed = 0;
+      return;
+    }
     this.activeVehicleGroup = next;
     this.signalStage = 'vehicle-green';
     const queue = this.agents.filter((agent) => agent.route.signalGroup === next && !agent.signalCleared && agent.speed < 1).length;
@@ -672,8 +815,7 @@ export class TrafficSimulation {
       if (this.signalStage === 'transit-amber') return 'amber';
       return 'red';
     }
-    const aggregateApproach = APPROACH_ORDER.find((approach) => group === `vehicle-${approach}`);
-    const matches = group === this.activeVehicleGroup || (aggregateApproach !== undefined && this.activeVehicleGroup.startsWith(`vehicle-${aggregateApproach}-`));
+    const matches = group === this.activeVehicleGroup;
     if (!matches) return 'red';
     if (this.signalStage === 'vehicle-green') return 'green';
     if (this.signalStage === 'vehicle-amber') return 'amber';
@@ -700,6 +842,19 @@ export class TrafficSimulation {
     return { ...sampleSmoothPolyline(agent.route.points, displayDistance), scale: Math.min(agent.scale, 1 - (1 - exitProgress) ** 3) };
   }
 
+  tramModulePoses(agent: TrafficAgent): AgentPose[] {
+    if (agent.mode !== 'tram') return [this.pose(agent)];
+    const routeLength = polylineLength(agent.route.points);
+    const interpolation = clamp(this.accumulator / FIXED_STEP, 0, 1);
+    const centerDistance = agent.previousDistance <= agent.distance
+      ? agent.previousDistance + (agent.distance - agent.previousDistance) * interpolation
+      : agent.distance;
+    return [-6.15, 0, 6.15].map((offset) => ({
+      ...sampleSmoothPolyline(agent.route.points, clamp(centerDistance + offset, 0, routeLength)),
+      scale: agent.scale,
+    }));
+  }
+
   snapshot(): string {
     return JSON.stringify({
       density: this.density,
@@ -708,6 +863,7 @@ export class TrafficSimulation {
       elapsed: Number(this.elapsed.toFixed(3)),
       signal: [this.activeVehicleGroup, this.signalStage, this.activeTransitGroup, Number(this.stageElapsed.toFixed(3))],
       crossings: [this.signalCrossings, this.redLightViolations, Number(this.tramSignalWaitingSeconds.toFixed(3))],
+      tramSafety: [this.tramOverlapViolations, this.tramReservationOverlapViolations, [...this.tramReservations]],
       pedestrians: this.pedestrianGroups.map((group) => [group.id, group.queue, group.signal, group.inCrossing, group.served, Number(group.totalWaitSeconds.toFixed(3)), Number(group.nextArrival.toFixed(3))]),
       agents: this.agents.map((agent) => [
         agent.id, agent.routeId, Number(agent.distance.toFixed(3)), Number(agent.speed.toFixed(3)), Number(agent.acceleration.toFixed(3)),

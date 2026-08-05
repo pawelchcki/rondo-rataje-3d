@@ -11,7 +11,7 @@ describe('engineering traffic model', () => {
     const vehicleGroups = new Set(TRAFFIC_NETWORK.routes.filter((route) => route.mode === 'car').map((route) => route.signalGroup));
     expect(vehicleGroups.size).toBe(16);
     expect(TRAFFIC_NETWORK.pedestrianGroups).toHaveLength(11);
-    expect(TRAFFIC_NETWORK.detectors).toHaveLength(16);
+    expect(TRAFFIC_NETWORK.detectors).toHaveLength(99);
     expect(TRAFFIC_NETWORK.conflictZones.length).toBeGreaterThanOrEqual(4);
     expect(TRAFFIC_NETWORK.downstreamSectors).toHaveLength(4);
     expect(TRAFFIC_NETWORK.roundaboutLaneChanges).toBe(false);

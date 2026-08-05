@@ -26,6 +26,13 @@ export interface SceneApi {
   readonly simulationTime: number;
   readonly activeSignalGroups: string[];
   readonly trafficSignals: Record<string, 'red' | 'amber' | 'green' | 'stop' | 'walk' | 'clearance'>;
+  readonly trafficSignalStations: typeof TRAFFIC_NETWORK.signals;
+  readonly innerZoneOccupancy: Record<string, string[]>;
+  readonly tramReservations: Record<string, string>;
+  readonly tramOverlapViolations: number;
+  readonly tramReservationOverlapViolations: number;
+  readonly tramTracks: typeof TRAFFIC_NETWORK.tramTracks;
+  readonly tramRailCount: number;
   readonly trafficSignalCrossings: number;
   readonly trafficRedLightViolations: number;
   readonly tramPriorityMode: TramPriorityMode;
@@ -53,6 +60,9 @@ export interface SceneApi {
     alighted: number;
     initialPassengers: number;
     delaySeconds: number;
+    trackId?: string;
+    moduleTrackDeviation?: number;
+    modules?: Array<{ point: [number, number]; heading: number }>;
   }>;
   setLayer(name: LayerName, visible: boolean): void;
   setView(name: 'oblique' | 'top'): void;
@@ -191,11 +201,18 @@ export class RatajeScene {
       get trafficSignals() {
         return Object.fromEntries([
           ...Object.keys(TRAFFIC_NETWORK.movementConflicts)
-            .filter((group) => group.startsWith('vehicle-') || group.startsWith('transit-'))
+            .filter((group) => /^K\d{2}$/.test(group) || group.startsWith('transit-'))
             .map((group) => [group, map.trafficSimulation.vehicleSignal(group)] as const),
           ...map.trafficSimulation.pedestrianTelemetry.map((group) => [group.id, group.signal] as const),
         ]);
       },
+      trafficSignalStations: TRAFFIC_NETWORK.signals,
+      get innerZoneOccupancy() { return map.trafficSimulation.occupiedInnerZones; },
+      get tramReservations() { return map.trafficSimulation.activeTramReservations; },
+      get tramOverlapViolations() { return map.trafficSimulation.tramOverlapViolations; },
+      get tramReservationOverlapViolations() { return map.trafficSimulation.tramReservationOverlapViolations; },
+      tramTracks: TRAFFIC_NETWORK.tramTracks,
+      tramRailCount: TRAFFIC_NETWORK.tramTracks.length * 2,
       get trafficSignalCrossings() { return map.trafficSimulation.signalCrossings; },
       get trafficRedLightViolations() { return map.trafficSimulation.redLightViolations; },
       get tramPriorityMode() { return map.trafficSimulation.tramPriority; },
@@ -224,6 +241,11 @@ export class RatajeScene {
           alighted: agent.alightedPassengers,
           initialPassengers: agent.initialPassengerCount,
           delaySeconds: agent.delaySeconds,
+          trackId: map.trafficSimulation.trackId(agent),
+          moduleTrackDeviation: agent.mode === 'tram' ? 0 : undefined,
+          modules: agent.mode === 'tram'
+            ? map.trafficSimulation.tramModulePoses(agent).map((pose) => ({ point: pose.point, heading: pose.heading }))
+            : undefined,
         }));
       },
       setLayer: (name, visible) => this.setLayer(name, visible),
@@ -303,13 +325,13 @@ export class RatajeScene {
       const ribbon = createRibbon(feature, this.sampler, this.elevationScale, featureOrdinal);
       this.transportLayer.add(ribbon);
       this.hoverTargets.push(ribbon);
-      if (feature.kind === 'tram') {
-        const gauge = Math.min(1.435, Math.max(0.8, feature.width * 0.26));
-        this.transportLayer.add(
-          createRail(feature.coordinates, -gauge / 2, this.sampler, this.elevationScale, featureOrdinal),
-          createRail(feature.coordinates, gauge / 2, this.sampler, this.elevationScale, featureOrdinal),
-        );
-      }
+    }
+    for (const [trackOrdinal, track] of TRAFFIC_NETWORK.tramTracks.entries()) {
+      const leftRail = createRail(track.points, -track.gauge / 2, this.sampler, this.elevationScale, this.manifest.transport.length + trackOrdinal);
+      const rightRail = createRail(track.points, track.gauge / 2, this.sampler, this.elevationScale, this.manifest.transport.length + trackOrdinal);
+      leftRail.name = `${track.id} left rail`;
+      rightRail.name = `${track.id} right rail`;
+      this.transportLayer.add(leftRail, rightRail);
     }
     for (const [featureOrdinal, building] of this.manifest.buildings.entries()) {
       const mesh = createBuilding(building, this.sampler, this.elevationScale, featureOrdinal);

@@ -8,7 +8,8 @@ Dołączony do repozytorium zestaw danych zawiera:
 - przycięte drogi, ciągi piesze i rowerowe, torowiska oraz pokrycie terenu z BDOT10k GUGiK;
 - 571 drzew odczytanych z publicznego modelu roślinności 3D GEOPOZ wraz z położeniem, identyfikatorem, gatunkiem, statusem, metodą pomiaru i wysokością;
 - 15 obrysów budynków BDOT10k oraz 11 oficjalnych punktów przystanków transportu zbiorowego;
-- autorską, deterministyczną symulację 16 grup kołowych, 11 ukrytych grup pieszych, autobusów i tramwajów z płynną interpolacją ruchu, kolejkami oraz bezpiecznymi fazami sygnalizacji;
+- autorską, deterministyczną symulację ośmiu stanowisk i 16 fizycznych grup kołowych `K01–K16`, 11 ukrytych grup pieszych, autobusów i tramwajów z płynną interpolacją ruchu, kolejkami oraz bezpiecznymi fazami sygnalizacji;
+- dwutorowe korytarze tramwajowe west–south, north–south i west–north z sześcioma kierunkowymi trasami, wspólną geometrią szyn i rezerwacją strefy przecięcia;
 - etykiety nad każdym pojazdem pokazujące czas obecności na planszy i szacunkową liczbę pasażerów, a dla tramwajów także liczbę oraz łączny czas postojów na światłach.
 
 ## Uruchomienie lokalne
@@ -31,6 +32,7 @@ Polecenia produkcyjne i weryfikacyjne:
 ```sh
 npm run typecheck
 npm test
+npm run test:traffic-long
 npm run build
 npm run test:smoke
 ```
@@ -62,8 +64,12 @@ Położenia, wysokości terenu, szerokości dostępne w BDOT10k, obrysy i liczby
 
 Bryły budynków powstają z oficjalnych obrysów i liczby kondygnacji przy założeniu 3,2 m na kondygnację; nie są pomiarowymi modelami dachów. Położenia przystanków są oficjalne, natomiast wiaty, ławki, znaki i wyświetlacze są reprezentatywnymi modelami low-poly ustawionymi względem najbliższej drogi lub torowiska. Dwa rekordy dworca autobusowego definiują jeden model terminalu z sześcioma równoległymi, półprzezroczystymi dachami kolebkowymi, ciemnoniebieskimi ramami, zatokami, peronami i zadaszonym przejściem poprzecznym.
 
-Niewielkie przesunięcia wysokości warstw i funkcja `polygonOffset` zapobiegają migotaniu współpłaszczyznowych powierzchni bez zmiany danych źródłowych ani terenu. Geometria pasów, oznakowanie, sygnalizacja, program ruchu i liczby pasażerów są autorską nakładką symulacyjną opartą na rzucie BDOT10k. Liczby pasażerów są deterministycznymi szacunkami z zakresów 1–4 dla samochodu, 12–80 dla autobusu i 35–180 dla tramwaju; nie są pomiarem rzeczywistego napełnienia. Zakresy zweryfikowano względem pojemności poznańskiego taboru podawanych przez MPK: [80 miejsc w Solarisie Urbino 12 hydrogen](https://www.mpk.poznan.pl/tabor/solaris-urbino-12-hydrogen/) oraz [240 miejsc w Moderusie Gamma LF04](https://www.mpk.poznan.pl/tabor/moderus-gamma-lf04-ac-bd/). Popyt pieszy 180 osób/h przy terminalu i 90 osób/h na pozostałych przejściach jest jawną estymacją, skalowaną przez profile `quiet` (35%), `typical` (65%) i `peak-2023` (100%). Strumień ul. Krzywoustego 3256 pojazdów/2,5 h jest oznaczony jako pomiar, a pozostałe wloty i strumienie transportu publicznego jako estymacje wraz z metodą i datą w `RATAJE_DEMAND_DATASET`. Model nie jest obrazem ruchu na żywo ani odwzorowaniem miejskiego sterownika sygnalizacji. BDOT10k jest źródłem topograficznym i pozostaje bardziej uogólniony niż dokumentacja inżynierii ruchu.
+Niewielkie przesunięcia wysokości warstw i funkcja `polygonOffset` zapobiegają migotaniu współpłaszczyznowych powierzchni bez zmiany danych źródłowych ani terenu. Geometria pasów, oznakowanie, program ruchu i liczby pasażerów są autorską nakładką symulacyjną opartą na rzucie BDOT10k. Osiem stanowisk kołowych — cztery na wlotach i cztery na tarczy — odwzorowuje układ z rysunku 2.2 opracowania [Miasto Poznań / ALDESA / SAFEGE opublikowanego przez MSR TRAFFIC](https://www.klir.pl/biuletyny/100-10_Wybrane_wdrozenia_firmy_MSR_TRAFFIC.pdf). Identyfikatory `K01–K16` są lokalną stabilną normalizacją, a dokładne współrzędne zostały dopasowane do geometrii sceny; oba poziomy pochodzenia zapisuje `TRAFFIC_NETWORK.provenance`.
 
-Stan diagnostyczny jest dostępny przez `window.__RONDO_RATAJE__`: obejmuje dataset popytu, kolejki i fazy piesze, bieżące napełnienia, wymianę pasażerów, postoje, sygnały, opóźnienia oraz deterministyczny reset z ziarnem.
+Każdy korytarz BDOT o szerokości 5,2 m ma środki torów odsunięte o ±1,55 m i szyny o rozstawie 1,435 m. Łuki są próbkowane wspólną krzywą centrypetalną co najwyżej co 0,5 m. Tramwaj składa się z trzech modułów, z których każdy używa własnej pozycji i stycznej tej samej geometrii. Sterownik rezerwuje wspólną strefę przecięcia i zachowuje odstęp pełnej długości składu na współdzielonych `trackId`. Macierz godzinnych przebiegów dla trzech profili, trybów priorytetu i ziaren uruchamia `npm run test:traffic-long`.
+
+Liczby pasażerów są deterministycznymi szacunkami z zakresów 1–4 dla samochodu, 12–80 dla autobusu i 35–180 dla tramwaju; nie są pomiarem rzeczywistego napełnienia. Zakresy zweryfikowano względem pojemności poznańskiego taboru podawanych przez MPK: [80 miejsc w Solarisie Urbino 12 hydrogen](https://www.mpk.poznan.pl/tabor/solaris-urbino-12-hydrogen/) oraz [240 miejsc w Moderusie Gamma LF04](https://www.mpk.poznan.pl/tabor/moderus-gamma-lf04-ac-bd/). Popyt pieszy 180 osób/h przy terminalu i 90 osób/h na pozostałych przejściach jest jawną estymacją, skalowaną przez profile `quiet` (35%), `typical` (65%) i `peak-2023` (100%). Strumień ul. Krzywoustego 3256 pojazdów/2,5 h jest oznaczony jako pomiar, a pozostałe wloty i strumienie transportu publicznego jako estymacje wraz z metodą i datą w `RATAJE_DEMAND_DATASET`. Model nie jest obrazem ruchu na żywo ani odwzorowaniem miejskiego sterownika sygnalizacji. BDOT10k jest źródłem topograficznym i pozostaje bardziej uogólniony niż dokumentacja inżynierii ruchu.
+
+Stan diagnostyczny jest dostępny przez `window.__RONDO_RATAJE__`: obejmuje osiem stanowisk, stany `K01–K16`, zajętość stref wewnętrznych, `trackId` i trzy pozy modułów każdego tramwaju, aktywne rezerwacje, liczniki naruszeń, dataset popytu, kolejki i fazy piesze, bieżące napełnienia, wymianę pasażerów, postoje, opóźnienia oraz deterministyczny reset z ziarnem.
 
 Atrybucja danych: Główny Urząd Geodezji i Kartografii (GUGiK); Zarząd Geodezji i Katastru Miejskiego GEOPOZ / Miasto Poznań.

@@ -72,12 +72,16 @@ test('renders measured terrain and trees and responds to controls', async ({ pag
       groups: api?.pedestrianQueues.length,
       served: api?.servedPedestrians,
       activeSignals: Object.keys(api?.trafficSignals ?? {}).length,
+      signalStations: api?.trafficSignalStations.length,
+      kGroups: Object.keys(api?.trafficSignals ?? {}).filter((group) => /^K\d{2}$/.test(group)).length,
+      tramTracks: api?.tramTracks.length,
+      tramRails: api?.tramRailCount,
       transitPassengers: api?.totalTransitPassengers,
     };
   });
   expect(hiddenPedestrians).toMatchObject({ profile: 'typical', groups: 11 });
   expect(hiddenPedestrians.served).toBeGreaterThan(0);
-  expect(hiddenPedestrians.activeSignals).toBe(31);
+  expect(hiddenPedestrians).toMatchObject({ activeSignals: 33, signalStations: 8, kGroups: 16, tramTracks: 12, tramRails: 24 });
   expect(hiddenPedestrians.transitPassengers).toBeGreaterThan(0);
   await expect(page.locator('#pedestrian-served')).not.toHaveText('0');
   await expect(page.locator('#transit-passengers')).not.toHaveText('0');
@@ -92,6 +96,12 @@ test('renders measured terrain and trees and responds to controls', async ({ pag
   expect(comparison.telemetry).toHaveLength(46);
   expect(comparison.telemetry?.every((agent) => agent.visibleSeconds > 0 && agent.passengers >= 1)).toBe(true);
   expect(comparison.telemetry?.filter((agent) => agent.mode === 'tram').every((agent) => agent.passengers >= 35)).toBe(true);
+  expect(comparison.telemetry?.filter((agent) => agent.mode === 'tram').every((agent) => agent.trackId && agent.modules?.length === 3 && agent.moduleTrackDeviation! <= 0.15)).toBe(true);
+  expect(await page.evaluate(() => ({
+    overlaps: (window as RatajeWindow).__RONDO_RATAJE__?.tramOverlapViolations,
+    reservationOverlaps: (window as RatajeWindow).__RONDO_RATAJE__?.tramReservationOverlapViolations,
+    reservations: Object.keys((window as RatajeWindow).__RONDO_RATAJE__?.tramReservations ?? {}).length,
+  }))).toMatchObject({ overlaps: 0, reservationOverlaps: 0 });
 
   await page.getByRole('button', { name: 'Duże' }).click();
   expect(await page.evaluate(() => (window as RatajeWindow).__RONDO_RATAJE__?.activeAgentCounts)).toEqual({ cars: 70, buses: 7, trams: 3 });
